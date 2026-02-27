@@ -19,6 +19,8 @@ pub enum Item {
     Role(RoleDef),
     /// `speak` 语句。
     Speak(SpeakStmt),
+    /// `sleep` 语句，用于在执行过程中延迟一段时间（毫秒）。
+    Sleep(SleepStmt),
     // 预留：PresetDef / Let / If / For / While 等。
 }
 
@@ -52,5 +54,13 @@ pub struct SpeakStmt {
     pub text: String,
     /// 覆盖参数，例如 `speed = 1.2`。
     pub params: HashMap<String, String>,
+}
+
+/// `sleep` 语句。
+/// 语法：`sleep 1000` 表示延迟 1000 毫秒。
+#[derive(Debug, Clone)]
+pub struct SleepStmt {
+    /// 延迟时长（毫秒）。
+    pub duration_ms: u64,
 }
 

@@ -6,8 +6,8 @@ edition = "2024"
 [dependencies]
 vox-core = { path = "../core" }
 vox-tts-http = { path = "../tts-http" }
-vox-audio = { path = "../audio" }
 tokio = { workspace = true }
-vox-dsl = { path = "../dsl" }
+vox-engine = { path = "../engine" }
+vox-runner = { path = "../runner" }
 clap = { version = "4.5", features = ["derive"] }
 

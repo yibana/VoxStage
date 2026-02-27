@@ -1,0 +1,10 @@
+[package]
+name = "vox-runner"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+vox-engine = { path = "../engine" }
+vox-audio = { path = "../audio" }
+tokio = { workspace = true }
+

@@ -5,6 +5,8 @@ members = [
     "crates/audio",
     "crates/cli",
     "crates/dsl",
+    "crates/engine",
+    "crates/runner",
 ]
 resolver = "2"
 

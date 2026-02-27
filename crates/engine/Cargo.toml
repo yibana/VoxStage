@@ -1,0 +1,11 @@
+[package]
+name = "vox-engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+vox-core = { path = "../core" }
+vox-dsl = { path = "../dsl" }
+thiserror = "1.0"
+tokio = { workspace = true }
+

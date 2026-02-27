@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Item, ModelDef, RoleDef, Script, SpeakStmt};
+use crate::ast::{Item, ModelDef, RoleDef, Script, SpeakStmt, SleepStmt};
 use crate::error::ParseError;
 
 /// 将 DSL 源码解析为 `Script` AST。
@@ -41,6 +41,9 @@ pub fn parse_script(src: &str) -> Result<Script, ParseError> {
         } else if trimmed.starts_with("speak ") {
             let speak = parse_speak(line_idx, trimmed)?;
             items.push(Item::Speak(speak));
+        } else if trimmed.starts_with("sleep ") {
+            let sleep = parse_sleep(line_idx, trimmed)?;
+            items.push(Item::Sleep(sleep));
         } else {
             return Err(ParseError::new(
                 line_idx + 1,
@@ -51,6 +54,36 @@ pub fn parse_script(src: &str) -> Result<Script, ParseError> {
     }
 
     Ok(Script { items })
+}
+
+/// 解析一行 `sleep` 语句。
+/// 语法：`sleep 1000`，单位为毫秒。
+fn parse_sleep(line_idx: usize, line: &str) -> Result<SleepStmt, ParseError> {
+    let trimmed = line.trim_start();
+    let rest = trimmed
+        .strip_prefix("sleep")
+        .ok_or_else(|| ParseError::new(line_idx + 1, 1, "无效的 sleep 语句".to_string()))?
+        .trim();
+
+    if rest.is_empty() {
+        return Err(ParseError::new(
+            line_idx + 1,
+            1,
+            "sleep 缺少时长参数（毫秒）".to_string(),
+        ));
+    }
+
+    // 允许使用下划线分隔数字，例如 1_000。
+    let digits: String = rest.chars().filter(|c| *c != '_').collect();
+    let duration_ms: u64 = digits.parse().map_err(|_| {
+        ParseError::new(
+            line_idx + 1,
+            1,
+            format!("无法解析 sleep 时长（毫秒）: {rest}"),
+        )
+    })?;
+
+    Ok(SleepStmt { duration_ms })
 }
 
 /// 解析 `model xxx { ... }` 块。
@@ -205,35 +238,118 @@ fn parse_role_block<'a>(
 }
 
 /// 解析一行 `speak` 语句。
+/// 支持语法：
+/// - `speak Girl "文本"`
+/// - `speak Girl(speed = 1.2, language = "ZH") "文本"`
 fn parse_speak(line_idx: usize, line: &str) -> Result<SpeakStmt, ParseError> {
-    // 期望格式：speak Target "文本内容"
     let trimmed = line.trim_start();
-    let rest = trimmed
+    let mut rest = trimmed
         .strip_prefix("speak")
         .ok_or_else(|| ParseError::new(line_idx + 1, 1, "无效的 speak 语句".to_string()))?
         .trim_start();
 
-    // 拿到目标名称（直到空白字符）。
-    let mut parts = rest.splitn(2, char::is_whitespace);
-    let target = parts
-        .next()
-        .ok_or_else(|| ParseError::new(line_idx + 1, 1, "speak 缺少目标名称".to_string()))?
-        .to_string();
-
-    let after_target = parts
-        .next()
-        .ok_or_else(|| ParseError::new(line_idx + 1, 1, "speak 缺少文本部分".to_string()))?
-        .trim_start();
-
-    // 只解析最简单的双引号字符串，不处理转义。
-    if !after_target.starts_with('"') {
+    // 1. 解析目标名称：读取到第一个空白或 '('。
+    let mut chars = rest.chars().peekable();
+    let mut target = String::new();
+    while let Some(&ch) = chars.peek() {
+        if ch.is_whitespace() || ch == '(' || ch == '"' {
+            break;
+        }
+        target.push(ch);
+        chars.next();
+    }
+    if target.is_empty() {
         return Err(ParseError::new(
             line_idx + 1,
             1,
-            "speak 文本必须以双引号开头".to_string(),
+            "speak 缺少目标名称".to_string(),
         ));
     }
-    let mut chars = after_target.chars();
+
+    // 2. 跳过目标名称后的空白。
+    while let Some(&ch) = chars.peek() {
+        if ch.is_whitespace() {
+            chars.next();
+        } else {
+            break;
+        }
+    }
+
+    // 3. 如果下一个字符是 '('，则解析参数列表。
+    let mut params = HashMap::new();
+    if let Some(&'(') = chars.peek() {
+        chars.next(); // 跳过 '('
+        let mut param_buf = String::new();
+        let mut depth = 1;
+        while let Some(ch) = chars.next() {
+            match ch {
+                '(' => {
+                    depth += 1;
+                    param_buf.push(ch);
+                }
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    } else {
+                        param_buf.push(ch);
+                    }
+                }
+                _ => param_buf.push(ch),
+            }
+        }
+        if depth != 0 {
+            return Err(ParseError::new(
+                line_idx + 1,
+                1,
+                "speak 参数缺少右括号 ')'".to_string(),
+            ));
+        }
+
+        // 将括号内部内容按 ',' 拆分为若干 `key = value`。
+        for part in param_buf.split(',') {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Some((k, v)) = parse_key_value(trimmed) {
+                params.insert(k.to_string(), v);
+            } else {
+                return Err(ParseError::new(
+                    line_idx + 1,
+                    1,
+                    format!("无法解析 speak 参数: {trimmed}"),
+                ));
+            }
+        }
+
+        // 括号结束后继续跳过空白。
+        while let Some(&ch) = chars.peek() {
+            if ch.is_whitespace() {
+                chars.next();
+            } else {
+                break;
+            }
+        }
+    }
+
+    // 4. 此时应当来到文本部分，必须以双引号开头。
+    if let Some(&first) = chars.peek() {
+        if first != '"' {
+            return Err(ParseError::new(
+                line_idx + 1,
+                1,
+                "speak 文本必须以双引号开头".to_string(),
+            ));
+        }
+    } else {
+        return Err(ParseError::new(
+            line_idx + 1,
+            1,
+            "speak 缺少文本部分".to_string(),
+        ));
+    }
+
     chars.next(); // 跳过开头的 "
     let mut text = String::new();
     let mut closed = false;
@@ -256,7 +372,7 @@ fn parse_speak(line_idx: usize, line: &str) -> Result<SpeakStmt, ParseError> {
     Ok(SpeakStmt {
         target,
         text,
-        params: HashMap::new(),
+        params,
     })
 }
 

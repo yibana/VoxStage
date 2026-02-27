@@ -10,5 +10,7 @@ role Girl {
   speaker_id = "0"
 }
 
-speak Girl "你好，这是 VoxStage 的第一个 DSL 示例。"
-
+speak Girl "你好，这是的第一个示例"
+speak Girl(speed = 1.3) "这句语速更快"
+sleep 3000
+speak Girl(speed = 1) "这句语速更更快"

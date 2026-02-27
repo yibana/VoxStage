@@ -1,8 +1,6 @@
 //! vox-dsl 开发阶段基础解析测试。
 //! 这些测试只关注 AST 结构是否按预期构造，不涉及执行与模型调用。
 
-use std::collections::HashMap;
-
 use vox_dsl::{parse_script, Item};
 
 /// 基础脚本解析：model + role + speak。
@@ -70,5 +68,49 @@ model {
 
     let err = parse_script(src).expect_err("应当解析失败");
     assert!(err.message.contains("model 定义缺少名称"));
+}
+
+/// speak 参数覆盖语法：speak Girl(speed = 1.3, language = "EN") "..."
+#[test]
+fn parse_speak_with_params() {
+    let src = r#"
+role Girl {
+  model = bert_vits2
+  speed = "1.1"
+}
+
+speak Girl(speed = 1.3, language = "EN") "Hi"
+"#;
+
+    let script = parse_script(src).expect("parse_script should succeed");
+    assert_eq!(script.items.len(), 2);
+
+    match &script.items[1] {
+        Item::Speak(speak) => {
+            assert_eq!(speak.target, "Girl");
+            assert_eq!(speak.text, "Hi");
+            assert_eq!(speak.params.get("speed").unwrap(), "1.3");
+            assert_eq!(speak.params.get("language").unwrap(), "EN");
+        }
+        other => panic!("第二个语句应为 SpeakStmt，实际为: {:?}", other),
+    }
+}
+
+/// sleep 语句解析：sleep 1000
+#[test]
+fn parse_sleep_stmt() {
+    let src = r#"
+sleep 1000
+"#;
+
+    let script = parse_script(src).expect("parse_script should succeed");
+    assert_eq!(script.items.len(), 1);
+
+    match &script.items[0] {
+        Item::Sleep(s) => {
+            assert_eq!(s.duration_ms, 1000);
+        }
+        other => panic!("首个语句应为 SleepStmt，实际为: {:?}", other),
+    }
 }
 
