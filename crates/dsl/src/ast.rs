@@ -17,11 +17,18 @@ pub enum Item {
     Model(ModelDef),
     /// `role` 定义块。
     Role(RoleDef),
+    /// `let` 变量定义。
+    Let(LetStmt),
     /// `speak` 语句。
     Speak(SpeakStmt),
     /// `sleep` 语句，用于在执行过程中延迟一段时间（毫秒）。
     Sleep(SleepStmt),
-    // 预留：PresetDef / Let / If / For / While 等。
+    /// 条件语句。
+    If(IfStmt),
+    /// 固定次数循环。
+    For(ForStmt),
+    /// 条件循环。
+    While(WhileStmt),
 }
 
 /// `model xxx { ... }` 定义。
@@ -56,11 +63,62 @@ pub struct SpeakStmt {
     pub params: HashMap<String, String>,
 }
 
+/// `let` 变量定义语句。
+/// 语法示例：`let user_name = "小明"` 或 `let speed_fast = 1.3`。
+#[derive(Debug, Clone)]
+pub struct LetStmt {
+    /// 变量名称。
+    pub name: String,
+    /// 原始字符串值（不区分类型，数值/字符串由执行层自行解析）。
+    pub value: String,
+}
+
 /// `sleep` 语句。
 /// 语法：`sleep 1000` 表示延迟 1000 毫秒。
 #[derive(Debug, Clone)]
 pub struct SleepStmt {
     /// 延迟时长（毫秒）。
     pub duration_ms: u64,
+}
+
+/// if 条件运算符。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CondOp {
+    Eq,  // ==
+    Neq, // !=
+}
+
+/// if 条件：形如 `var == "value"` 或 `var != "value"`。
+#[derive(Debug, Clone)]
+pub struct IfCondition {
+    pub var: String,
+    pub op: CondOp,
+    pub value: String,
+}
+
+/// if 语句。
+/// MVP 阶段只支持 if，无 else。
+#[derive(Debug, Clone)]
+pub struct IfStmt {
+    pub condition: IfCondition,
+    pub body: Vec<Item>,
+}
+
+/// for 语句，按次数循环。
+#[derive(Debug, Clone)]
+pub struct ForStmt {
+    /// 循环次数。
+    pub times: u64,
+    /// 循环体语句。
+    pub body: Vec<Item>,
+}
+
+/// while 语句，基于变量字符串值判断是否继续循环。
+#[derive(Debug, Clone)]
+pub struct WhileStmt {
+    /// 控制循环的变量名，变量为 "true"（忽略大小写）时继续循环。
+    pub var: String,
+    /// 循环体语句。
+    pub body: Vec<Item>,
 }
 

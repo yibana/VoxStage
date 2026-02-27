@@ -10,12 +10,13 @@ mod model_manager;
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::pin::Pin;
 
 use thiserror::Error;
 use tokio::time::{sleep, Duration};
 use tokio::sync::mpsc;
 use vox_core::{AudioStream, SynthesisRequest, TtsError};
-use vox_dsl::{parse_script, Item, Script, SpeakStmt, SleepStmt};
+use vox_dsl::{parse_script, CondOp, IfCondition, Item, Script, SpeakStmt, SleepStmt};
 
 pub use model_manager::ModelManager;
 
@@ -34,6 +35,53 @@ pub enum EngineError {
     /// 文本合成失败。
     #[error("synthesis failed: {0:?}")]
     Synthesis(TtsError),
+}
+
+/// 角色运行时配置。
+struct RoleRuntimeConfig {
+    /// 绑定的模型名称（需与已注册 Provider 名称一致）。
+    model: String,
+    /// 默认参数表，例如 speed / language / speaker_id 等。
+    params: HashMap<String, String>,
+}
+
+/// 执行时上下文：包含脚本本身、角色配置与变量表。
+struct ExecContext {
+    script: Script,
+    roles: HashMap<String, RoleRuntimeConfig>,
+    vars: HashMap<String, String>,
+}
+
+/// 从源码构建执行上下文：解析 DSL，并收集角色与变量定义。
+fn build_exec_context(src: &str) -> Result<ExecContext, EngineError> {
+    let script = parse_script(src)?;
+
+    let mut roles: HashMap<String, RoleRuntimeConfig> = HashMap::new();
+    let mut vars: HashMap<String, String> = HashMap::new();
+
+    for item in &script.items {
+        match item {
+            Item::Role(role_def) => {
+                roles.insert(
+                    role_def.name.clone(),
+                    RoleRuntimeConfig {
+                        model: role_def.model.clone(),
+                        params: role_def.params.clone(),
+                    },
+                );
+            }
+            Item::Let(let_stmt) => {
+                vars.insert(let_stmt.name.clone(), let_stmt.value.clone());
+            }
+            _ => {}
+        }
+    }
+
+    Ok(ExecContext {
+        script,
+        roles,
+        vars,
+    })
 }
 
 /// 运行一段 DSL 脚本：
@@ -68,38 +116,66 @@ where
     F: FnMut(String, AudioStream) -> Fut,
     Fut: Future<Output = ()>,
 {
-    let script = parse_script(src)?;
+    let mut ctx = build_exec_context(src)?;
+    let items = ctx.script.items.clone();
+    exec_items_streaming(manager, &mut ctx, &items, &mut on_output).await
+}
 
-    // 1. 从 AST 收集角色配置。
-    let mut roles: HashMap<String, RoleRuntimeConfig> = HashMap::new();
-    for item in &script.items {
-        if let Item::Role(role_def) = item {
-            roles.insert(
-                role_def.name.clone(),
-                RoleRuntimeConfig {
-                    model: role_def.model.clone(),
-                    params: role_def.params.clone(),
-                },
-            );
-        }
-    }
-
-    // 2. 顺序执行语句：speak 推送音频，sleep 控制时间。
-    for item in &script.items {
-        match item {
-            Item::Speak(speak) => {
-                let (model_name, audio) =
-                    execute_speak(manager, &roles, &script, speak).await?;
-                on_output(model_name, audio).await;
+/// 遍历并执行一组语句（streaming 版本）。
+fn exec_items_streaming<'a, F, Fut>(
+    manager: &'a ModelManager,
+    ctx: &'a mut ExecContext,
+    items: &'a [Item],
+    on_output: &'a mut F,
+) -> Pin<Box<dyn Future<Output = Result<(), EngineError>> + 'a>>
+where
+    F: FnMut(String, AudioStream) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    Box::pin(async move {
+        for item in items {
+            match item {
+                Item::Model(_) => {}
+                Item::Role(role_def) => {
+                    ctx.roles.insert(
+                        role_def.name.clone(),
+                        RoleRuntimeConfig {
+                            model: role_def.model.clone(),
+                            params: role_def.params.clone(),
+                        },
+                    );
+                }
+                Item::Let(let_stmt) => {
+                    ctx.vars
+                        .insert(let_stmt.name.clone(), let_stmt.value.clone());
+                }
+                Item::Speak(speak) => {
+                    let (model_name, audio) = execute_speak(manager, ctx, speak).await?;
+                    on_output(model_name, audio).await;
+                }
+                Item::Sleep(stmt) => {
+                    execute_sleep(stmt).await?;
+                }
+                Item::If(if_stmt) => {
+                    if eval_if_condition(&ctx.vars, &if_stmt.condition) {
+                        exec_items_streaming(manager, ctx, &if_stmt.body, on_output).await?;
+                    }
+                }
+                Item::For(for_stmt) => {
+                    for _ in 0..for_stmt.times {
+                        exec_items_streaming(manager, ctx, &for_stmt.body, on_output).await?;
+                    }
+                }
+                Item::While(while_stmt) => {
+                    while is_var_true(&ctx.vars, &while_stmt.var) {
+                        exec_items_streaming(manager, ctx, &while_stmt.body, on_output).await?;
+                    }
+                }
             }
-            Item::Sleep(stmt) => {
-                execute_sleep(stmt).await?;
-            }
-            _ => {}
         }
-    }
 
-    Ok(())
+        Ok(())
+    })
 }
 
 /// 执行层命令枚举。
@@ -129,47 +205,71 @@ where
     F: FnMut(EngineCommand) -> Fut,
     Fut: Future<Output = ()>,
 {
-    let script = parse_script(src)?;
+    let mut ctx = build_exec_context(src)?;
+    let items = ctx.script.items.clone();
+    exec_items_to_commands(manager, &mut ctx, &items, &mut on_command).await
+}
 
-    // 1. 从 AST 收集角色配置。
-    let mut roles: HashMap<String, RoleRuntimeConfig> = HashMap::new();
-    for item in &script.items {
-        if let Item::Role(role_def) = item {
-            roles.insert(
-                role_def.name.clone(),
-                RoleRuntimeConfig {
-                    model: role_def.model.clone(),
-                    params: role_def.params.clone(),
-                },
-            );
-        }
-    }
-
-    // 2. 顺序执行语句，将其转化为执行命令。
-    for item in &script.items {
-        match item {
-            Item::Speak(speak) => {
-                let (model_name, audio) =
-                    execute_speak(manager, &roles, &script, speak).await?;
-
-                match audio {
-                    AudioStream::Full(data) => {
+/// 遍历并执行一组语句（命令队列版本）。
+fn exec_items_to_commands<'a, F, Fut>(
+    manager: &'a ModelManager,
+    ctx: &'a mut ExecContext,
+    items: &'a [Item],
+    on_command: &'a mut F,
+) -> Pin<Box<dyn Future<Output = Result<(), EngineError>> + 'a>>
+where
+    F: FnMut(EngineCommand) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    Box::pin(async move {
+        for item in items {
+            match item {
+                Item::Model(_) => {}
+                Item::Role(role_def) => {
+                    ctx.roles.insert(
+                        role_def.name.clone(),
+                        RoleRuntimeConfig {
+                            model: role_def.model.clone(),
+                            params: role_def.params.clone(),
+                        },
+                    );
+                }
+                Item::Let(let_stmt) => {
+                    ctx.vars
+                        .insert(let_stmt.name.clone(), let_stmt.value.clone());
+                }
+                Item::Speak(speak) => {
+                    let (model_name, audio) = execute_speak(manager, ctx, speak).await?;
+                    if let AudioStream::Full(data) = audio {
                         on_command(EngineCommand::SpeakAudio { model_name, data }).await;
                     }
-                    // 当前仅支持完整音频的预编译，其他形态可以在未来扩展。
+                }
+                Item::Sleep(stmt) => {
+                    on_command(EngineCommand::Sleep {
+                        duration_ms: stmt.duration_ms,
+                    })
+                    .await;
+                }
+                Item::If(if_stmt) => {
+                    if eval_if_condition(&ctx.vars, &if_stmt.condition) {
+                        exec_items_to_commands(manager, ctx, &if_stmt.body, on_command).await?;
+                    }
+                }
+                Item::For(for_stmt) => {
+                    for _ in 0..for_stmt.times {
+                        exec_items_to_commands(manager, ctx, &for_stmt.body, on_command).await?;
+                    }
+                }
+                Item::While(while_stmt) => {
+                    while is_var_true(&ctx.vars, &while_stmt.var) {
+                        exec_items_to_commands(manager, ctx, &while_stmt.body, on_command).await?;
+                    }
                 }
             }
-            Item::Sleep(stmt) => {
-                on_command(EngineCommand::Sleep {
-                    duration_ms: stmt.duration_ms,
-                })
-                .await;
-            }
-            _ => {}
         }
-    }
 
-    Ok(())
+        Ok(())
+    })
 }
 
 /// 将脚本编译后的命令推入 mpsc 队列。
@@ -188,28 +288,14 @@ pub async fn compile_script_to_channel(
     .await
 }
 
-/// 执行一条 `sleep` 语句，在当前任务内延迟指定毫秒数。
-async fn execute_sleep(stmt: &SleepStmt) -> Result<(), EngineError> {
-    sleep(Duration::from_millis(stmt.duration_ms)).await;
-    Ok(())
-}
-
-/// 用于运行时持有从 DSL `role` 定义中抽取的配置。
-struct RoleRuntimeConfig {
-    /// 绑定的模型名称（需与已注册 Provider 名称一致）。
-    model: String,
-    /// 默认参数表，例如 speed / language / speaker_id 等。
-    params: HashMap<String, String>,
-}
-
 /// 执行单条 `speak` 语句：根据角色找到对应 Provider，合成文本并返回音频流。
 async fn execute_speak(
     manager: &ModelManager,
-    roles: &HashMap<String, RoleRuntimeConfig>,
-    _script: &Script,
+    ctx: &ExecContext,
     speak: &SpeakStmt,
 ) -> Result<(String, AudioStream), EngineError> {
-    let role_cfg = roles
+    let role_cfg = ctx
+        .roles
         .get(&speak.target)
         .ok_or_else(|| EngineError::UnknownRole(speak.target.clone()))?;
 
@@ -232,8 +318,10 @@ async fn execute_speak(
         extra.insert("speaker_id".to_string(), speaker_id);
     }
 
+    let interpolated_text = interpolate_text(&speak.text, &ctx.vars);
+
     let req = SynthesisRequest {
-        text: speak.text.clone(),
+        text: interpolated_text,
         role: Some(speak.target.clone()),
         speed,
         volume,
@@ -271,5 +359,63 @@ fn get_param_string(role: &RoleRuntimeConfig, speak: &SpeakStmt, key: &str) -> O
     } else {
         None
     }
+}
+
+/// 执行一条 `sleep` 语句，在当前任务内延迟指定毫秒数。
+async fn execute_sleep(stmt: &SleepStmt) -> Result<(), EngineError> {
+    sleep(Duration::from_millis(stmt.duration_ms)).await;
+    Ok(())
+}
+
+/// 判断变量是否为逻辑真（字符串值为 "true" 时，忽略大小写）。
+fn is_var_true(vars: &HashMap<String, String>, name: &str) -> bool {
+    vars.get(name)
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// 计算 if 条件是否为真。
+fn eval_if_condition(vars: &HashMap<String, String>, cond: &IfCondition) -> bool {
+    let current = vars.get(&cond.var).cloned().unwrap_or_default();
+    match cond.op {
+        CondOp::Eq => current == cond.value,
+        CondOp::Neq => current != cond.value,
+    }
+}
+
+/// 在 speak 文本中执行 `${var}` 风格的简单字符串插值。
+fn interpolate_text(text: &str, vars: &HashMap<String, String>) -> String {
+    let mut result = String::new();
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '$' {
+            if let Some('{') = chars.peek().copied() {
+                chars.next(); // 跳过 '{'
+                let mut name = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c == '}' {
+                        chars.next(); // 跳过 '}'
+                        break;
+                    } else {
+                        name.push(c);
+                        chars.next();
+                    }
+                }
+                if let Some(value) = vars.get(&name) {
+                    result.push_str(value);
+                } else {
+                    // 如果变量未定义，则保留原样。
+                    result.push_str("${");
+                    result.push_str(&name);
+                    result.push('}');
+                }
+                continue;
+            }
+        }
+        result.push(ch);
+    }
+
+    result
 }
 

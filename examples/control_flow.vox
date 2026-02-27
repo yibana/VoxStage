@@ -1,0 +1,40 @@
+# 变量定义
+let user_name = "小明"
+let lang = "ZH"
+let repeat_count = 3
+
+model bert_vits2 {
+  type = "http"
+  endpoint = "http://localhost:5000"
+}
+
+role Girl {
+  model = bert_vits2
+  speed = "1.2"
+  language = "ZH"
+  speaker_id = "0"
+}
+
+# if 条件分支
+if lang == "ZH" {
+  speak Girl "你好，${user_name}，这是 如果 分支。"
+} 
+
+sleep 1000
+
+# for 次数循环
+for 3 {
+  speak Girl "这是 否 循环中的一句话。"
+  sleep 500
+}
+
+# while 循环（这里演示一次性退出）
+let keep_running = "true"
+
+while keep_running {
+    let user_name = "小红"
+  speak Girl "为哦 ${user_name}循环第一次执行。"
+  let keep_running = "false"
+}
+
+speak Girl "你好，${user_name}，结束了。"

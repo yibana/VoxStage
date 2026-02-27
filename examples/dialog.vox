@@ -1,0 +1,20 @@
+let user_name = "小明"
+let greeting = "你好"
+
+model bert_vits2 {
+  type = "http"
+  endpoint = "http://localhost:5000"
+}
+
+role Girl {
+  model = bert_vits2
+  speed = "1.2"
+  language = "ZH"
+  speaker_id = "0"
+}
+
+speak Girl "${greeting}，${user_name}，欢迎来到 VoxStage。"
+speak Girl(speed = 1.4) "接下来，我会为你演示 DSL 驱动的多句连续播报。"
+sleep 1500
+speak Girl "当前时间相关的逻辑，${user_name}未来可以通过 let 和 if 扩展实现。"
+

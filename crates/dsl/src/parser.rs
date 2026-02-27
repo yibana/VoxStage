@@ -18,7 +18,10 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Item, ModelDef, RoleDef, Script, SpeakStmt, SleepStmt};
+use crate::ast::{
+    CondOp, IfCondition, IfStmt, Item, LetStmt, ModelDef, RoleDef, Script, SpeakStmt, SleepStmt,
+    ForStmt, WhileStmt,
+};
 use crate::error::ParseError;
 
 /// 将 DSL 源码解析为 `Script` AST。
@@ -38,12 +41,24 @@ pub fn parse_script(src: &str) -> Result<Script, ParseError> {
         } else if trimmed.starts_with("role ") {
             let role = parse_role_block(line_idx, trimmed, &mut lines, src)?;
             items.push(Item::Role(role));
+        } else if trimmed.starts_with("let ") {
+            let let_stmt = parse_let(line_idx, trimmed)?;
+            items.push(Item::Let(let_stmt));
         } else if trimmed.starts_with("speak ") {
             let speak = parse_speak(line_idx, trimmed)?;
             items.push(Item::Speak(speak));
         } else if trimmed.starts_with("sleep ") {
             let sleep = parse_sleep(line_idx, trimmed)?;
             items.push(Item::Sleep(sleep));
+        } else if trimmed.starts_with("if ") {
+            let if_stmt = parse_if(line_idx, trimmed, &mut lines, src)?;
+            items.push(Item::If(if_stmt));
+        } else if trimmed.starts_with("for ") {
+            let for_stmt = parse_for(line_idx, trimmed, &mut lines, src)?;
+            items.push(Item::For(for_stmt));
+        } else if trimmed.starts_with("while ") {
+            let while_stmt = parse_while(line_idx, trimmed, &mut lines, src)?;
+            items.push(Item::While(while_stmt));
         } else {
             return Err(ParseError::new(
                 line_idx + 1,
@@ -54,6 +69,287 @@ pub fn parse_script(src: &str) -> Result<Script, ParseError> {
     }
 
     Ok(Script { items })
+}
+
+/// 解析 `if` 语句块。
+fn parse_if<'a>(
+    first_line_idx: usize,
+    first_line: &str,
+    lines: &mut std::iter::Peekable<impl Iterator<Item = (usize, &'a str)>>,
+    src: &str,
+) -> Result<IfStmt, ParseError> {
+    // 处理头部，可能是 `if cond {` 或 `if cond`
+    let mut header = first_line.trim_end().to_string();
+    let has_open_brace = header.ends_with('{');
+    if has_open_brace {
+        header.pop();
+        header = header.trim_end().to_string();
+    }
+
+    let rest = header
+        .strip_prefix("if")
+        .ok_or_else(|| ParseError::new(first_line_idx + 1, 1, "无效的 if 语句".to_string()))?
+        .trim();
+
+    let condition = parse_if_condition(first_line_idx, rest)?;
+
+    // 如果首行不带 `{`，则继续读取下一行，期望是 `{`
+    if !has_open_brace {
+        if let Some((idx, line)) = lines.next() {
+            if line.trim() != "{" {
+                return Err(ParseError::new(
+                    idx + 1,
+                    1,
+                    "if 语句缺少 '{'".to_string(),
+                ));
+            }
+        } else {
+            return Err(ParseError::new(
+                first_line_idx + 1,
+                1,
+                "if 语句未完成".to_string(),
+            ));
+        }
+    }
+
+    let body = parse_block_items(lines, src, first_line_idx, "if")?;
+
+    Ok(IfStmt { condition, body })
+}
+
+/// 解析 if 条件部分：`var == "value"` 或 `var != "value"`。
+fn parse_if_condition(line_idx: usize, rest: &str) -> Result<IfCondition, ParseError> {
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    if parts.len() < 3 {
+        return Err(ParseError::new(
+            line_idx + 1,
+            1,
+            "if 条件语法错误，期望形如 `if var == \"value\"`".to_string(),
+        ));
+    }
+
+    let var = parts[0].to_string();
+    let op_str = parts[1];
+    let op = match op_str {
+        "==" => CondOp::Eq,
+        "!=" => CondOp::Neq,
+        _ => {
+            return Err(ParseError::new(
+                line_idx + 1,
+                1,
+                format!("不支持的 if 运算符: {op_str}"),
+            ))
+        }
+    };
+
+    // 将 value 的剩余部分拼成一个字符串再去掉引号。
+    let value_raw = parts[2..].join(" ");
+    let value = if (value_raw.starts_with('"') && value_raw.ends_with('"'))
+        || (value_raw.starts_with('\'') && value_raw.ends_with('\''))
+    {
+        value_raw[1..value_raw.len() - 1].to_string()
+    } else {
+        value_raw
+    };
+
+    Ok(IfCondition { var, op, value })
+}
+
+/// 解析 `for` 次数循环块。
+fn parse_for<'a>(
+    first_line_idx: usize,
+    first_line: &str,
+    lines: &mut std::iter::Peekable<impl Iterator<Item = (usize, &'a str)>>,
+    src: &str,
+) -> Result<ForStmt, ParseError> {
+    let mut header = first_line.trim_end().to_string();
+    let has_open_brace = header.ends_with('{');
+    if has_open_brace {
+        header.pop();
+        header = header.trim_end().to_string();
+    }
+
+    let rest = header
+        .strip_prefix("for")
+        .ok_or_else(|| ParseError::new(first_line_idx + 1, 1, "无效的 for 语句".to_string()))?
+        .trim();
+
+    if rest.is_empty() {
+        return Err(ParseError::new(
+            first_line_idx + 1,
+            1,
+            "for 语句缺少次数参数".to_string(),
+        ));
+    }
+
+    let times: u64 = rest.parse().map_err(|_| {
+        ParseError::new(
+            first_line_idx + 1,
+            1,
+            format!("无法解析 for 次数: {rest}"),
+        )
+    })?;
+
+    if !has_open_brace {
+        if let Some((idx, line)) = lines.next() {
+            if line.trim() != "{" {
+                return Err(ParseError::new(
+                    idx + 1,
+                    1,
+                    "for 语句缺少 '{'".to_string(),
+                ));
+            }
+        } else {
+            return Err(ParseError::new(
+                first_line_idx + 1,
+                1,
+                "for 语句未完成".to_string(),
+            ));
+        }
+    }
+
+    let body = parse_block_items(lines, src, first_line_idx, "for")?;
+
+    Ok(ForStmt { times, body })
+}
+
+/// 解析 `while` 循环块。
+fn parse_while<'a>(
+    first_line_idx: usize,
+    first_line: &str,
+    lines: &mut std::iter::Peekable<impl Iterator<Item = (usize, &'a str)>>,
+    src: &str,
+) -> Result<WhileStmt, ParseError> {
+    let mut header = first_line.trim_end().to_string();
+    let has_open_brace = header.ends_with('{');
+    if has_open_brace {
+        header.pop();
+        header = header.trim_end().to_string();
+    }
+
+    let rest = header
+        .strip_prefix("while")
+        .ok_or_else(|| ParseError::new(first_line_idx + 1, 1, "无效的 while 语句".to_string()))?
+        .trim();
+
+    if rest.is_empty() {
+        return Err(ParseError::new(
+            first_line_idx + 1,
+            1,
+            "while 语句缺少条件变量名".to_string(),
+        ));
+    }
+
+    let var = rest.to_string();
+
+    if !has_open_brace {
+        if let Some((idx, line)) = lines.next() {
+            if line.trim() != "{" {
+                return Err(ParseError::new(
+                    idx + 1,
+                    1,
+                    "while 语句缺少 '{'".to_string(),
+                ));
+            }
+        } else {
+            return Err(ParseError::new(
+                first_line_idx + 1,
+                1,
+                "while 语句未完成".to_string(),
+            ));
+        }
+    }
+
+    let body = parse_block_items(lines, src, first_line_idx, "while")?;
+
+    Ok(WhileStmt { var, body })
+}
+
+/// 解析一个 `{ ... }` 代码块内部的语句列表，直到遇到对应的 `}`。
+fn parse_block_items<'a>(
+    lines: &mut std::iter::Peekable<impl Iterator<Item = (usize, &'a str)>>,
+    src: &str,
+    open_line_idx: usize,
+    block_name: &str,
+) -> Result<Vec<Item>, ParseError> {
+    let mut items = Vec::new();
+
+    while let Some((idx, line)) = lines.next() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+            continue;
+        }
+        if trimmed == "}" {
+            return Ok(items);
+        }
+
+        if trimmed.starts_with("model ") {
+            let model = parse_model_block(idx, trimmed, lines, src)?;
+            items.push(Item::Model(model));
+        } else if trimmed.starts_with("role ") {
+            let role = parse_role_block(idx, trimmed, lines, src)?;
+            items.push(Item::Role(role));
+        } else if trimmed.starts_with("let ") {
+            let let_stmt = parse_let(idx, trimmed)?;
+            items.push(Item::Let(let_stmt));
+        } else if trimmed.starts_with("speak ") {
+            let speak = parse_speak(idx, trimmed)?;
+            items.push(Item::Speak(speak));
+        } else if trimmed.starts_with("sleep ") {
+            let sleep = parse_sleep(idx, trimmed)?;
+            items.push(Item::Sleep(sleep));
+        } else if trimmed.starts_with("if ") {
+            let if_stmt = parse_if(idx, trimmed, lines, src)?;
+            items.push(Item::If(if_stmt));
+        } else if trimmed.starts_with("for ") {
+            let for_stmt = parse_for(idx, trimmed, lines, src)?;
+            items.push(Item::For(for_stmt));
+        } else if trimmed.starts_with("while ") {
+            let while_stmt = parse_while(idx, trimmed, lines, src)?;
+            items.push(Item::While(while_stmt));
+        } else {
+            return Err(ParseError::new(
+                idx + 1,
+                1,
+                format!("无法识别的语句开头: {trimmed}"),
+            ));
+        }
+    }
+
+    Err(ParseError::new(
+        open_line_idx + 1,
+        1,
+        format!("{block_name} 块缺少 '}}'"),
+    ))
+}
+/// 解析一行 `let` 变量定义语句。
+/// 语法：`let name = value`，其中 value 可以是带引号的字符串或裸数字。
+fn parse_let(line_idx: usize, line: &str) -> Result<LetStmt, ParseError> {
+    let trimmed = line.trim_start();
+    let rest = trimmed
+        .strip_prefix("let")
+        .ok_or_else(|| ParseError::new(line_idx + 1, 1, "无效的 let 语句".to_string()))?
+        .trim();
+
+    if let Some((name, value)) = parse_key_value(rest) {
+        if name.is_empty() {
+            return Err(ParseError::new(
+                line_idx + 1,
+                1,
+                "let 语句缺少变量名".to_string(),
+            ));
+        }
+        Ok(LetStmt {
+            name: name.to_string(),
+            value,
+        })
+    } else {
+        Err(ParseError::new(
+            line_idx + 1,
+            1,
+            format!("无法解析 let 语句: {rest}"),
+        ))
+    }
 }
 
 /// 解析一行 `sleep` 语句。
