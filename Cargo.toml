@@ -4,6 +4,7 @@ members = [
     "crates/tts-http",
     "crates/audio",
     "crates/cli",
+    "crates/dsl",
 ]
 resolver = "2"
 

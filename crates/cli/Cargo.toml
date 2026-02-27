@@ -8,4 +8,6 @@ vox-core = { path = "../core" }
 vox-tts-http = { path = "../tts-http" }
 vox-audio = { path = "../audio" }
 tokio = { workspace = true }
+vox-dsl = { path = "../dsl" }
+clap = { version = "4.5", features = ["derive"] }
 
