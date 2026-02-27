@@ -1,0 +1,11 @@
+[package]
+name = "vox-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+vox-core = { path = "../core" }
+vox-tts-http = { path = "../tts-http" }
+vox-audio = { path = "../audio" }
+tokio = { workspace = true }
+

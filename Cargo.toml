@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/tts-http",
+    "crates/audio",
+    "crates/cli",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+
+[workspace.dependencies]
+tokio = { version = "1.40", features = ["full"] }
+async-trait = "0.1"
+reqwest = { version = "0.12", default-features = true }
+rodio = { version = "0.18", default-features = true }
