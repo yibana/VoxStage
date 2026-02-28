@@ -2084,6 +2084,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vox-core",
+ "vox-dsl",
  "vox-engine",
  "vox-runner",
  "vox-tts-http",

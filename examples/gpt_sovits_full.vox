@@ -1,0 +1,110 @@
+##############################
+# GPT-SoVITS v2 语法全集示例 #
+##############################
+
+# 1. model 块：声明一个 GPT-SoVITS v2 模型
+# - type       固定写成 "http"（当前 CLI 工厂只支持 http）
+# - provider   选择具体 Provider："gpt_sovits_v2"
+# - endpoint   GPT-SoVITS 服务地址（例如你给出的 127.0.0.1:9880 /tts）
+# - model_id   默认的 ref_audio_path，可被 role/speak 覆盖
+model gpt_sovits_v2 {
+  type = "http"
+  provider = "gpt_sovits_v2"
+  endpoint = "http://127.0.0.1:9880"
+}
+
+# 2. let 变量定义：字符串或数字都按字符串存
+let user_name = "观众朋友"
+let need_wolf = "true"
+let loop_count = 3
+let keep_running = "false"
+let bgm_path = "crates\sounds\846519_9034501-lq.mp3"
+
+# 3. role 块：绑定模型 + 默认参数（会映射到 GPT-SoVITS 的 query）
+role Wolf {
+  model = gpt_sovits_v2
+
+  # 语言相关：language → text_lang / prompt_lang
+  language = "zh"
+
+  # GPT-SoVITS 专用字段（会透传到 extra）：
+  ref_audio_path = "laugh1.wav"
+  prompt_lang = "zh"
+  prompt_text = "大家好啊，哈哈，我是从来不带节奏的血狼破军，今天来点大家想看的东西。"
+  text_split_method = "cut5"
+  batch_size = "1"
+  media_type = "wav"
+  streaming_mode = "false"
+
+  # 语速/音量/音高：目前主要给其它 Provider 用，这里仅保留演示
+  speed = "1.1"
+  volume = "1.0"
+  pitch = "1.0"
+}
+
+########################
+# 4. BGM：背景音乐控制 #
+########################
+
+# 播放一段循环 BGM（路径来自变量 bgm_path）
+bgm "${bgm_path}" loop
+bgm_volume 1
+
+########################
+# 5. speak / sleep 基础 #
+########################
+
+# 基本发声：使用 role 默认参数和变量插值
+speak Wolf "大家好，我是 GPT-SoVITS v2 的演示狼，欢迎你，${user_name}。"
+sleep 800
+
+# 带参数覆盖的 speak：临时提高语速，并修改 prompt_text
+speak Wolf(speed = 1.3) "接下来，我们快速地念一段经典台词。"
+sleep 600
+
+########################
+# 6. if 条件分支       #
+########################
+
+if need_wolf == "true" {
+  speak Wolf "因为 need_wolf 为 true，所以你听到了这句额外的旁白。"
+}
+
+sleep 500
+
+########################
+# 7. for 次数循环      #
+########################
+
+for 3 {
+  speak Wolf "这是 for 循环中的一句话，一共会重复三遍。"
+  sleep 400
+}
+
+########################
+# 8. while 条件循环    #
+########################
+
+# while 依赖变量 keep_running：
+# - 当 keep_running == \"true\"（忽略大小写）时，进入循环；
+# - 目前 DSL 还没有在循环内修改变量的语句，所以这里默认 keep_running = \"false\"，只作为语法示例。
+while keep_running {
+  speak Wolf "这是 while 循环中的一句话（演示用，默认不会执行到这里）。"
+  sleep 500
+}
+
+########################
+# 9. 结束前的 BGM 控制 #
+########################
+
+bgm_pause
+speak Wolf "我已经暂停了背景音乐，让你更专注地听这一句总结。"
+sleep 800
+
+bgm_resume
+speak Wolf "现在再把背景音乐打开，准备结束演示。"
+sleep 1000
+
+bgm_stop
+speak Wolf "背景音乐已经关闭，本次 GPT-SoVITS v2 全语法演示到此结束，谢谢收听。"
+

@@ -39,35 +39,46 @@ pub fn play_audio_blocking(data: &[u8]) -> Result<(), AudioError> {
 // BGM 控制：独立 Sink，支持循环、暂停、恢复、音量、停止
 // ---------------------------------------------------------------------------
 
-/// BGM 控制器：持有默认输出流与专用 Sink，用于背景音播放、暂停、恢复与音量。
+/// BGM 控制器：持有专用 Sink，用于背景音播放、暂停、恢复与音量。
+/// 可与 TTS 共用同一 OutputStream（通过 `PlaybackContext` 创建），避免多路输出导致无声。
 pub struct BgmController {
-    _stream: OutputStream,
     _stream_handle: OutputStreamHandle,
     bgm_sink: Sink,
 }
 
 impl BgmController {
-    /// 创建 BGM 控制器，使用系统默认输出设备。
-    pub fn try_new() -> Result<Self, AudioError> {
-        let (stream, stream_handle) =
-            OutputStream::try_default().map_err(|e| AudioError::OutputStreamInitFailed(e.to_string()))?;
-        let bgm_sink =
-            Sink::try_new(&stream_handle).map_err(|e| AudioError::OutputStreamInitFailed(e.to_string()))?;
+    /// 使用已有的输出句柄创建 BGM 控制器（与 TTS 共用同一设备时使用）。
+    pub fn new(stream_handle: OutputStreamHandle) -> Result<Self, AudioError> {
+        let bgm_sink = Sink::try_new(&stream_handle)
+            .map_err(|e| AudioError::OutputStreamInitFailed(e.to_string()))?;
         Ok(Self {
-            _stream: stream,
             _stream_handle: stream_handle,
             bgm_sink,
         })
     }
 
+    /// 创建 BGM 控制器，并单独占用系统默认输出设备（不推荐与 TTS 混用时使用）。
+    pub fn try_new() -> Result<Self, AudioError> {
+        let (_stream, stream_handle) =
+            OutputStream::try_default().map_err(|e| AudioError::OutputStreamInitFailed(e.to_string()))?;
+        Self::new(stream_handle)
+    }
+
+    /// 判断是否为 MP3 魔数（ID3 或帧同步），用于决定是否使用 repeat_infinite。
+    fn is_mp3(data: &[u8]) -> bool {
+        data.starts_with(b"ID3")
+            || (data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0)
+    }
+
     /// 播放 BGM。若当前有在播，会先清空再播放。
     /// - `data`: 完整音频字节（WAV/MP3 等，由 Decoder 识别）。
-    /// - `r#loop`: 是否循环播放。
+    /// - `r#loop`: 是否循环播放。MP3 格式当前不使用 repeat_infinite，仅播放一遍，避免 rodio 下无声。
     pub fn play_bgm(&self, data: Vec<u8>, r#loop: bool) -> Result<(), AudioError> {
+        let is_mp3 = Self::is_mp3(&data);
         self.bgm_sink.clear();
         let cursor = Cursor::new(data);
         let decoder = Decoder::new(cursor).map_err(|e| AudioError::DecodeFailed(e.to_string()))?;
-        if r#loop {
+        if r#loop && !is_mp3 {
             self.bgm_sink.append(decoder.repeat_infinite());
         } else {
             self.bgm_sink.append(decoder);
@@ -94,6 +105,42 @@ impl BgmController {
     /// 设置 BGM 音量，1.0 为原始音量。
     pub fn set_bgm_volume(&self, volume: f32) {
         self.bgm_sink.set_volume(volume);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 统一播放上下文：BGM 与 TTS 共用同一 OutputStream，避免多路输出导致 BGM 无声
+// ---------------------------------------------------------------------------
+
+/// 统一播放上下文：持有一个默认输出流，BGM 与 TTS 共用该设备，避免部分系统上 BGM 无声。
+pub struct PlaybackContext {
+    _stream: OutputStream,
+    stream_handle: OutputStreamHandle,
+    pub bgm: BgmController,
+}
+
+impl PlaybackContext {
+    /// 创建播放上下文（BGM + TTS 共用同一输出设备）。
+    pub fn try_new() -> Result<Self, AudioError> {
+        let (stream, stream_handle) =
+            OutputStream::try_default().map_err(|e| AudioError::OutputStreamInitFailed(e.to_string()))?;
+        let bgm = BgmController::new(stream_handle.clone())?;
+        Ok(Self {
+            _stream: stream,
+            stream_handle,
+            bgm,
+        })
+    }
+
+    /// 使用当前输出设备阻塞播放一段 TTS 音频（与 BGM 同设备）。
+    pub fn play_tts_blocking(&self, data: &[u8]) -> Result<(), AudioError> {
+        let sink = Sink::try_new(&self.stream_handle)
+            .map_err(|e| AudioError::OutputStreamInitFailed(e.to_string()))?;
+        let cursor = Cursor::new(data.to_vec());
+        let source = Decoder::new(cursor).map_err(|e| AudioError::DecodeFailed(e.to_string()))?;
+        sink.append(source);
+        sink.sleep_until_end();
+        Ok(())
     }
 }
 

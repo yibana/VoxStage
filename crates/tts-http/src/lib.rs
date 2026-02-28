@@ -166,8 +166,6 @@ impl TtsProvider for BertVits2Provider {
     }
 }
 
-/// GPT-SoVITS-v2 示例 Provider。
-/// 当前实现仍然是占位版本，仅打印参数并返回伪造的音频数据。
 pub struct GptSovitsV2Provider {
     /// Provider 的人类可读名称。
     name: String,
@@ -175,6 +173,8 @@ pub struct GptSovitsV2Provider {
     capabilities: ModelCapabilities,
     /// 基础配置（例如 HTTP endpoint、模型 ID 等）。
     config: GptSovitsV2Config,
+    /// 可复用的 HTTP 客户端实例。
+    client: Client,
 }
 
 impl GptSovitsV2Provider {
@@ -198,6 +198,7 @@ impl GptSovitsV2Provider {
             name: name.into(),
             capabilities,
             config,
+            client: Client::new(),
         }
     }
 
@@ -221,20 +222,119 @@ impl TtsProvider for GptSovitsV2Provider {
         &self,
         req: SynthesisRequest,
     ) -> Result<AudioStream, TtsError> {
-        debug!(
-            text = %req.text,
-            role = ?req.role,
-            speed = ?req.speed,
-            volume = ?req.volume,
-            pitch = ?req.pitch,
-            emotion = ?req.emotion,
-            endpoint = %self.config.endpoint,
-            model_id = %self.config.model_id,
-            "GPT-SoVITS-v2 synthesize (placeholder)"
-        );
+        // 参考示例：
+        // GET http://127.0.0.1:9880/tts
+        //   ?text=...
+        //   &text_lang=zh
+        //   &ref_audio_path=laugh1
+        //   &prompt_lang=zh
+        //   &prompt_text=...
+        //   &text_split_method=cut5
+        //   &batch_size=1
+        //   &media_type=wav
+        //   &streaming_mode=true
 
-        let fake_audio: Vec<u8> = b"FAKE_AUDIO_GPT_SOVITS_V2".to_vec();
-        Ok(AudioStream::Full(fake_audio))
+        // 1. 语言相关：优先使用 extra.text_lang，其次 extra.language，默认 zh。
+        let raw_lang = req
+            .extra
+            .get("text_lang")
+            .cloned()
+            .or_else(|| req.extra.get("language").cloned())
+            .unwrap_or_else(|| "zh".to_string());
+        let text_lang = match raw_lang.to_ascii_lowercase().as_str() {
+            "zh_cn" | "zh-cn" => "zh".to_string(),
+            "en_us" | "en-us" => "en".to_string(),
+            other => other.to_string(),
+        };
+
+        // prompt_lang 默认跟随 text_lang，也可以通过 extra.prompt_lang 覆盖。
+        let prompt_lang = req
+            .extra
+            .get("prompt_lang")
+            .cloned()
+            .unwrap_or_else(|| text_lang.clone());
+
+        // 2. 参考音频路径：优先使用 extra.ref_audio_path，其次 extra.speaker_id，再次使用 config.model_id。
+        let ref_audio_path = req
+            .extra
+            .get("ref_audio_path")
+            .cloned()
+            .or_else(|| req.extra.get("speaker_id").cloned())
+            .unwrap_or_else(|| self.config.model_id.clone());
+
+        // 3. 提示文本：用于控制风格，来自 extra.prompt_text，默认为空字符串。
+        let prompt_text = req
+            .extra
+            .get("prompt_text")
+            .cloned()
+            .unwrap_or_default();
+
+        // 4. 其余参数：可通过 DSL 传入，提供合理默认值。
+        let text_split_method = req
+            .extra
+            .get("text_split_method")
+            .cloned()
+            .unwrap_or_else(|| "cut5".to_string());
+
+        let batch_size = req
+            .extra
+            .get("batch_size")
+            .cloned()
+            .unwrap_or_else(|| "1".to_string());
+
+        let media_type = req
+            .extra
+            .get("media_type")
+            .cloned()
+            .unwrap_or_else(|| "wav".to_string());
+
+        // 当前系统内部仍按一次性完整音频处理，streaming_mode 缺省为 false，
+        // 如需让后端按流式返回，可在 DSL 中通过 extra.streaming_mode = "true" 显式设置。
+        let streaming_mode = req
+            .extra
+            .get("streaming_mode")
+            .cloned()
+            .unwrap_or_else(|| "false".to_string());
+
+        let mut params: Vec<(&str, String)> = Vec::new();
+        params.push(("text", req.text.clone()));
+        params.push(("text_lang", text_lang));
+        params.push(("ref_audio_path", ref_audio_path));
+        params.push(("prompt_lang", prompt_lang));
+        params.push(("prompt_text", prompt_text));
+        params.push(("text_split_method", text_split_method));
+        params.push(("batch_size", batch_size));
+        params.push(("media_type", media_type));
+        params.push(("streaming_mode", streaming_mode));
+
+        let url = format!("{}/tts", self.config.endpoint.trim_end_matches('/'));
+
+        debug!(url = %url, "GPT-SoVITS-v2 request");
+
+        let resp = self
+            .client
+            .get(&url)
+            .query(&params)
+            .send()
+            .await
+            .map_err(|e| TtsError::RemoteError(format!("http request error: {e}")))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(TtsError::RemoteError(format!(
+                "unexpected status code: {}",
+                status
+            )));
+        }
+
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| TtsError::RemoteError(format!("read body error: {e}")))?;
+
+        info!(bytes = bytes.len(), "GPT-SoVITS-v2 audio received");
+
+        Ok(AudioStream::Full(bytes.to_vec()))
     }
 }
 

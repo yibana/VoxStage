@@ -1,6 +1,7 @@
 model bert_vits2 {
   type = "http"
   endpoint = "http://localhost:5000"
+  model_id = "0"
 }
 
 role Girl {

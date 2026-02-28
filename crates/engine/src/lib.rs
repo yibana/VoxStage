@@ -11,15 +11,39 @@ mod model_manager;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use thiserror::Error;
 use tokio::time::{sleep, Duration};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
-use vox_core::{AudioStream, SynthesisRequest, TtsError};
-use vox_dsl::{parse_script, CondOp, IfCondition, Item, Script, SpeakStmt, SleepStmt};
+use vox_core::{AudioStream, SynthesisRequest, TtsError, TtsProvider};
+use vox_dsl::{parse_script, CondOp, IfCondition, Item, ModelDef, Script, SpeakStmt, SleepStmt};
 
 pub use model_manager::ModelManager;
+
+/// 根据脚本中的 `model` 块，通过调用方提供的工厂函数创建 Provider 并注册到 `ModelManager`。
+/// 这样即可在 .vox 脚本里用 `model xxx { type = "http", endpoint = "..." }` 声明模型，由调用方（如 CLI）根据 `type` / `provider` 等字段实例化具体实现。
+///
+/// - `factory`: 对每个 `ModelDef` 调用一次，返回 `Ok(Arc<dyn TtsProvider>)` 即注册到 `def.name`；返回 `Err` 则中止并返回错误。
+pub fn register_providers_from_script<F, E>(
+    manager: &mut ModelManager,
+    src: &str,
+    mut factory: F,
+) -> Result<(), EngineError>
+where
+    F: FnMut(&ModelDef) -> Result<Arc<dyn TtsProvider>, E>,
+    E: std::fmt::Display,
+{
+    let script = parse_script(src)?;
+    for item in &script.items {
+        if let Item::Model(def) = item {
+            let provider = factory(def).map_err(|e| EngineError::ModelRegistration(e.to_string()))?;
+            manager.register(def.name.clone(), provider);
+        }
+    }
+    Ok(())
+}
 
 /// 执行引擎错误类型。
 #[derive(Debug, Error)]
@@ -39,6 +63,9 @@ pub enum EngineError {
     /// 音频/BGM 初始化或播放失败。
     #[error("audio/BGM: {0}")]
     Audio(String),
+    /// 根据脚本 model 块注册 Provider 时失败。
+    #[error("model registration: {0}")]
+    ModelRegistration(String),
 }
 
 /// 角色运行时配置。
@@ -268,8 +295,10 @@ where
                     .await;
                 }
                 Item::BgmPlay(stmt) => {
+                    // 支持在 BGM 路径中使用 `${var}` 变量插值，例如：bgm "${bgm_path}" loop
+                    let path = interpolate_text(&stmt.path_or_url, &ctx.vars);
                     on_command(EngineCommand::BgmPlay {
-                        path_or_url: stmt.path_or_url.clone(),
+                        path_or_url: path,
                         r#loop: stmt.r#loop,
                     })
                     .await;
@@ -356,6 +385,19 @@ async fn execute_speak(
     }
     if let Some(speaker_id) = get_param_string(role_cfg, speak, "speaker_id") {
         extra.insert("speaker_id".to_string(), speaker_id);
+    }
+
+    // 其余参数原样透传到 extra，便于 Provider 使用自定义字段（如 GPT-SoVITS-v2 的 ref_audio_path 等）。
+    const RESERVED_KEYS: &[&str] = &["speed", "volume", "pitch", "emotion", "language", "speaker_id"];
+    for (k, v) in &role_cfg.params {
+        if !RESERVED_KEYS.contains(&k.as_str()) && !extra.contains_key(k) {
+            extra.insert(k.clone(), v.clone());
+        }
+    }
+    for (k, v) in &speak.params {
+        if !RESERVED_KEYS.contains(&k.as_str()) {
+            extra.insert(k.clone(), v.clone());
+        }
     }
 
     let interpolated_text = interpolate_text(&speak.text, &ctx.vars);

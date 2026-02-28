@@ -1,0 +1,43 @@
+model bert_vits2 {
+  type = "http"
+  provider = "bert_vits2"
+  endpoint = "http://127.0.0.1:5000"
+  model_id = "0"
+}
+
+model gpt_sovits_v2 {
+  type = "http"
+  provider = "gpt_sovits_v2"
+  endpoint = "http://127.0.0.1:9880"
+  model_id = "laugh1"
+}
+
+role Narrator {
+  model = bert_vits2
+  language = "ZH"
+  speaker_id = "0"
+  speed = "1.1"
+}
+
+role Wolf {
+  model = gpt_sovits_v2
+  language = "zh"
+  ref_audio_path = "laugh1.wav"
+  prompt_lang = "zh"
+  prompt_text = "大家好啊，哈哈，我是从来不带节奏的血狼破军，今天来点大家想看的东西。"
+  text_split_method = "cut5"
+  batch_size = "1"
+  media_type = "wav"
+  streaming_mode = "false"
+}
+
+speak Wolf "接下来演示：同一段脚本里交替调用 bert_vits2 与 gpt_sovits_v2。"
+sleep 400
+
+speak Narrator "第一句由 Bert-VITS2 合成。"
+sleep 300
+
+speak Wolf "第二句由 GPT-SoVITS v2 合成。先帝创业未半而中道崩殂，今天下三分，益州疲弊，此诚危急存亡之秋也。"
+sleep 500
+
+speak Narrator "再切回 Bert-VITS2，确认模型切换正常。"
