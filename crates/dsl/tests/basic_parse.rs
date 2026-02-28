@@ -180,3 +180,49 @@ while keep_running {
     }
 }
 
+/// BGM 相关语句解析：bgm "path"、bgm_volume、bgm_pause / bgm_resume / bgm_stop。
+#[test]
+fn parse_bgm_stmts() {
+    let src = r#"
+bgm "crates/sounds/laugh1.wav"
+bgm "music.mp3" loop
+bgm "once.ogg" once
+bgm_volume 0.5
+bgm_pause
+bgm_resume
+bgm_stop
+"#;
+
+    let script = parse_script(src).expect("parse_script should succeed");
+    assert_eq!(script.items.len(), 7);
+
+    match &script.items[0] {
+        Item::BgmPlay(stmt) => {
+            assert_eq!(stmt.path_or_url, "crates/sounds/laugh1.wav");
+            assert!(stmt.r#loop);
+        }
+        other => panic!("首个应为 BgmPlay，实际为: {:?}", other),
+    }
+    match &script.items[1] {
+        Item::BgmPlay(stmt) => {
+            assert_eq!(stmt.path_or_url, "music.mp3");
+            assert!(stmt.r#loop);
+        }
+        other => panic!("第二个应为 BgmPlay，实际为: {:?}", other),
+    }
+    match &script.items[2] {
+        Item::BgmPlay(stmt) => {
+            assert_eq!(stmt.path_or_url, "once.ogg");
+            assert!(!stmt.r#loop);
+        }
+        other => panic!("第三个应为 BgmPlay(once)，实际为: {:?}", other),
+    }
+    match &script.items[3] {
+        Item::BgmVolume(stmt) => assert!((stmt.volume - 0.5).abs() < 1e-5),
+        other => panic!("第四个应为 BgmVolume，实际为: {:?}", other),
+    }
+    assert!(matches!(script.items[4], Item::BgmPause));
+    assert!(matches!(script.items[5], Item::BgmResume));
+    assert!(matches!(script.items[6], Item::BgmStop));
+}
+

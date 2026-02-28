@@ -15,6 +15,7 @@ use std::pin::Pin;
 use thiserror::Error;
 use tokio::time::{sleep, Duration};
 use tokio::sync::mpsc;
+use tracing::{debug, error};
 use vox_core::{AudioStream, SynthesisRequest, TtsError};
 use vox_dsl::{parse_script, CondOp, IfCondition, Item, Script, SpeakStmt, SleepStmt};
 
@@ -35,6 +36,9 @@ pub enum EngineError {
     /// 文本合成失败。
     #[error("synthesis failed: {0:?}")]
     Synthesis(TtsError),
+    /// 音频/BGM 初始化或播放失败。
+    #[error("audio/BGM: {0}")]
+    Audio(String),
 }
 
 /// 角色运行时配置。
@@ -156,6 +160,9 @@ where
                 Item::Sleep(stmt) => {
                     execute_sleep(stmt).await?;
                 }
+                Item::BgmPlay(_) | Item::BgmVolume(_) | Item::BgmPause | Item::BgmResume | Item::BgmStop => {
+                    // 流式执行时 BGM 不产生音频输出，由命令模式 + runner 处理。
+                }
                 Item::If(if_stmt) => {
                     if eval_if_condition(&ctx.vars, &if_stmt.condition) {
                         exec_items_streaming(manager, ctx, &if_stmt.body, on_output).await?;
@@ -191,6 +198,16 @@ pub enum EngineCommand {
     Sleep {
         duration_ms: u64,
     },
+    /// 背景音：播放（path_or_url 由 runner 加载为字节后交给 audio）。
+    BgmPlay {
+        path_or_url: String,
+        r#loop: bool,
+    },
+    /// 背景音：暂停 / 恢复 / 停止 / 音量。
+    BgmPause,
+    BgmResume,
+    BgmStop,
+    BgmVolume { volume: f32 },
 }
 
 /// 将脚本“编译”为一串顺序的执行命令（包含已合成的音频）。
@@ -250,6 +267,28 @@ where
                     })
                     .await;
                 }
+                Item::BgmPlay(stmt) => {
+                    on_command(EngineCommand::BgmPlay {
+                        path_or_url: stmt.path_or_url.clone(),
+                        r#loop: stmt.r#loop,
+                    })
+                    .await;
+                }
+                Item::BgmVolume(stmt) => {
+                    on_command(EngineCommand::BgmVolume {
+                        volume: stmt.volume,
+                    })
+                    .await;
+                }
+                Item::BgmPause => {
+                    on_command(EngineCommand::BgmPause).await;
+                }
+                Item::BgmResume => {
+                    on_command(EngineCommand::BgmResume).await;
+                }
+                Item::BgmStop => {
+                    on_command(EngineCommand::BgmStop).await;
+                }
                 Item::If(if_stmt) => {
                     if eval_if_condition(&ctx.vars, &if_stmt.condition) {
                         exec_items_to_commands(manager, ctx, &if_stmt.body, on_command).await?;
@@ -294,6 +333,7 @@ async fn execute_speak(
     ctx: &ExecContext,
     speak: &SpeakStmt,
 ) -> Result<(String, AudioStream), EngineError> {
+    debug!(target = %speak.target, "execute speak");
     let role_cfg = ctx
         .roles
         .get(&speak.target)
@@ -333,7 +373,10 @@ async fn execute_speak(
     let audio = provider
         .synthesize(req)
         .await
-        .map_err(EngineError::Synthesis)?;
+        .map_err(|e| {
+            error!(error = ?e, provider = %provider_name, "tts synthesize failed");
+            EngineError::Synthesis(e)
+        })?;
 
     Ok((provider_name.clone(), audio))
 }

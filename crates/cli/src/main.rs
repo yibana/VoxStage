@@ -8,6 +8,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use clap::Parser;
+use tracing::{info, warn};
+use tracing_subscriber::EnvFilter;
 use vox_engine::ModelManager;
 use vox_runner::run_script_with_audio;
 use vox_tts_http::{BertVits2Config, BertVits2Provider, GptSovitsV2Config, GptSovitsV2Provider};
@@ -20,6 +22,10 @@ struct CliArgs {
     /// 如果未提供，将使用内置示例脚本。
     #[arg(value_name = "SCRIPT_PATH")]
     script: Option<PathBuf>,
+
+    /// 日志级别：error / warn / info / debug / trace
+    #[arg(long, default_value = "info", value_name = "LEVEL")]
+    log_level: String,
 }
 
 /// Tokio 异步入口函数。
@@ -28,6 +34,9 @@ struct CliArgs {
 async fn main() {
     // 0. 解析命令行参数。
     let args = CliArgs::parse();
+
+    // 0.1 初始化日志系统。
+    init_logging(&args.log_level);
 
     // 1. 创建模型管理器，用于统一管理和切换 TTS Provider。
     let mut manager = ModelManager::new();
@@ -49,17 +58,17 @@ async fn main() {
     let gpt_provider = GptSovitsV2Provider::new("gpt_sovits_v2", gpt_config).into_shared();
     manager.register("gpt_sovits_v2", gpt_provider);
 
-    println!("已注册的模型数量: {}", manager.len());
+    info!("已注册的模型数量: {}", manager.len());
 
     // 4. 确定要执行的 DSL 源码：优先使用命令行传入的脚本文件，其次回退到内置示例。
     let script_source = if let Some(path) = args.script {
         match fs::read_to_string(&path) {
             Ok(content) => {
-                println!("从文件 `{}` 读取 DSL 脚本。", path.display());
+                info!("从文件 `{}` 读取 DSL 脚本。", path.display());
                 content
             }
             Err(err) => {
-                eprintln!(
+                warn!(
                     "读取脚本文件失败（{}），将使用内置示例脚本。错误: {err}",
                     path.display()
                 );
@@ -67,14 +76,31 @@ async fn main() {
             }
         }
     } else {
-        println!("未提供脚本路径，使用内置示例脚本。");
+        info!("未提供脚本路径，使用内置示例脚本。");
         default_demo_script().to_string()
     };
 
     // 5. 调用 runner，将脚本交给引擎执行并在本地播放音频。
     if let Err(err) = run_script_with_audio(&manager, &script_source).await {
-        eprintln!("执行脚本失败: {err:?}");
+        tracing::error!("执行脚本失败: {err:?}");
     }
+}
+
+/// 初始化日志输出。
+/// - 默认输出到标准输出。
+/// - 允许通过 `--log-level` 控制全局过滤级别。
+/// - 用户也可以通过 `RUST_LOG` 覆盖（优先级更高）。
+fn init_logging(level: &str) {
+    // 若设置了 RUST_LOG，则优先使用它；否则使用 --log-level。
+    let filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new(level))
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .compact()
+        .try_init();
 }
 
 /// 返回一个内置的示例 DSL 脚本，用于未传入脚本路径或读取失败时的回退。

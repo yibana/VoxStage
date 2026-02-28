@@ -32,7 +32,7 @@ for 3 {
 let keep_running = "true"
 
 while keep_running {
-    let user_name = "小红"
+  let user_name = "小红"
   speak Girl "为哦 ${user_name}循环第一次执行。"
   let keep_running = "false"
 }

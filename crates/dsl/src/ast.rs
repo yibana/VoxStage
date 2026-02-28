@@ -29,6 +29,29 @@ pub enum Item {
     For(ForStmt),
     /// 条件循环。
     While(WhileStmt),
+    /// 背景音：播放。
+    BgmPlay(BgmPlayStmt),
+    /// 背景音：音量。
+    BgmVolume(BgmVolumeStmt),
+    /// 背景音：暂停 / 恢复 / 停止（无参语句）。
+    BgmPause,
+    BgmResume,
+    BgmStop,
+}
+
+/// `bgm "path_or_url"` 或 `bgm "path" loop`。
+#[derive(Debug, Clone)]
+pub struct BgmPlayStmt {
+    /// 文件路径或 URL 字符串（由 runner 负责解析与加载）。
+    pub path_or_url: String,
+    /// 是否循环播放，默认 true。
+    pub r#loop: bool,
+}
+
+/// `bgm_volume 0.5`。
+#[derive(Debug, Clone)]
+pub struct BgmVolumeStmt {
+    pub volume: f32,
 }
 
 /// `model xxx { ... }` 定义。

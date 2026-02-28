@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use reqwest::Client;
+use tracing::{debug, info};
 
 use vox_core::{AudioStream, ModelCapabilities, SynthesisRequest, TtsError, TtsProvider};
 
@@ -135,7 +136,7 @@ impl TtsProvider for BertVits2Provider {
         // 2. 构造完整 URL。
         let url = format!("{}/voice", self.config.endpoint.trim_end_matches('/'));
 
-        println!("[Bert-VITS2] GET {}", &url);
+        debug!(url = %url, "Bert-VITS2 request");
 
         // 3. 使用 GET + query 方式发送请求并获取音频字节。
         let resp = self
@@ -159,10 +160,7 @@ impl TtsProvider for BertVits2Provider {
             .await
             .map_err(|e| TtsError::RemoteError(format!("read body error: {e}")))?;
 
-        println!(
-            "[Bert-VITS2] received {} bytes of audio data",
-            bytes.len()
-        );
+        info!(bytes = bytes.len(), "Bert-VITS2 audio received");
 
         Ok(AudioStream::Full(bytes.to_vec()))
     }
@@ -223,13 +221,16 @@ impl TtsProvider for GptSovitsV2Provider {
         &self,
         req: SynthesisRequest,
     ) -> Result<AudioStream, TtsError> {
-        println!(
-            "[GPT-SoVITS-v2] synthesize: text=\"{}\", role={:?}, speed={:?}, volume={:?}, pitch={:?}, emotion={:?}",
-            req.text, req.role, req.speed, req.volume, req.pitch, req.emotion
-        );
-        println!(
-            "  endpoint={}, model_id={}",
-            self.config.endpoint, self.config.model_id
+        debug!(
+            text = %req.text,
+            role = ?req.role,
+            speed = ?req.speed,
+            volume = ?req.volume,
+            pitch = ?req.pitch,
+            emotion = ?req.emotion,
+            endpoint = %self.config.endpoint,
+            model_id = %self.config.model_id,
+            "GPT-SoVITS-v2 synthesize (placeholder)"
         );
 
         let fake_audio: Vec<u8> = b"FAKE_AUDIO_GPT_SOVITS_V2".to_vec();

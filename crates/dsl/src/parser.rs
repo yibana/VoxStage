@@ -19,8 +19,8 @@
 use std::collections::HashMap;
 
 use crate::ast::{
-    CondOp, IfCondition, IfStmt, Item, LetStmt, ModelDef, RoleDef, Script, SpeakStmt, SleepStmt,
-    ForStmt, WhileStmt,
+    BgmPlayStmt, BgmVolumeStmt, CondOp, IfCondition, IfStmt, Item, LetStmt, ModelDef, RoleDef,
+    Script, SpeakStmt, SleepStmt, ForStmt, WhileStmt,
 };
 use crate::error::ParseError;
 
@@ -59,6 +59,18 @@ pub fn parse_script(src: &str) -> Result<Script, ParseError> {
         } else if trimmed.starts_with("while ") {
             let while_stmt = parse_while(line_idx, trimmed, &mut lines, src)?;
             items.push(Item::While(while_stmt));
+        } else if trimmed.starts_with("bgm ") {
+            let stmt = parse_bgm_play(line_idx, trimmed)?;
+            items.push(Item::BgmPlay(stmt));
+        } else if trimmed.starts_with("bgm_volume ") {
+            let stmt = parse_bgm_volume(line_idx, trimmed)?;
+            items.push(Item::BgmVolume(stmt));
+        } else if trimmed == "bgm_pause" {
+            items.push(Item::BgmPause);
+        } else if trimmed == "bgm_resume" {
+            items.push(Item::BgmResume);
+        } else if trimmed == "bgm_stop" {
+            items.push(Item::BgmStop);
         } else {
             return Err(ParseError::new(
                 line_idx + 1,
@@ -307,6 +319,18 @@ fn parse_block_items<'a>(
         } else if trimmed.starts_with("while ") {
             let while_stmt = parse_while(idx, trimmed, lines, src)?;
             items.push(Item::While(while_stmt));
+        } else if trimmed.starts_with("bgm ") {
+            let stmt = parse_bgm_play(idx, trimmed)?;
+            items.push(Item::BgmPlay(stmt));
+        } else if trimmed.starts_with("bgm_volume ") {
+            let stmt = parse_bgm_volume(idx, trimmed)?;
+            items.push(Item::BgmVolume(stmt));
+        } else if trimmed == "bgm_pause" {
+            items.push(Item::BgmPause);
+        } else if trimmed == "bgm_resume" {
+            items.push(Item::BgmResume);
+        } else if trimmed == "bgm_stop" {
+            items.push(Item::BgmStop);
         } else {
             return Err(ParseError::new(
                 idx + 1,
@@ -321,6 +345,73 @@ fn parse_block_items<'a>(
         1,
         format!("{block_name} 块缺少 '}}'"),
     ))
+}
+
+/// 解析 `bgm "path_or_url"` 或 `bgm "path" loop`。
+fn parse_bgm_play(line_idx: usize, line: &str) -> Result<BgmPlayStmt, ParseError> {
+    let trimmed = line.trim_start();
+    let rest = trimmed
+        .strip_prefix("bgm")
+        .ok_or_else(|| ParseError::new(line_idx + 1, 1, "无效的 bgm 语句".to_string()))?
+        .trim();
+
+    let mut path_or_url = String::new();
+    let mut r#loop = true;
+    let mut chars = rest.chars().peekable();
+
+    if let Some(&c) = chars.peek() {
+        if c == '"' || c == '\'' {
+            let quote = c;
+            chars.next();
+            while let Some(ch) = chars.next() {
+                if ch == quote {
+                    break;
+                }
+                path_or_url.push(ch);
+            }
+        }
+    }
+    if path_or_url.is_empty() {
+        return Err(ParseError::new(
+            line_idx + 1,
+            1,
+            "bgm 语句需要带引号的路径或 URL".to_string(),
+        ));
+    }
+
+    let tail: String = chars.collect();
+    let tail = tail.trim();
+    if tail.eq_ignore_ascii_case("loop") {
+        r#loop = true;
+    } else if tail.eq_ignore_ascii_case("once") || tail.eq_ignore_ascii_case("no_loop") {
+        r#loop = false;
+    } else if !tail.is_empty() {
+        r#loop = tail.eq_ignore_ascii_case("true");
+    }
+
+    Ok(BgmPlayStmt {
+        path_or_url,
+        r#loop,
+    })
+}
+
+/// 解析 `bgm_volume 0.5`。
+fn parse_bgm_volume(line_idx: usize, line: &str) -> Result<BgmVolumeStmt, ParseError> {
+    let trimmed = line.trim_start();
+    let rest = trimmed
+        .strip_prefix("bgm_volume")
+        .ok_or_else(|| ParseError::new(line_idx + 1, 1, "无效的 bgm_volume 语句".to_string()))?
+        .trim();
+
+    let volume: f32 = rest.parse().map_err(|_| {
+        ParseError::new(
+            line_idx + 1,
+            1,
+            format!("无法解析 bgm_volume 数值: {rest}"),
+        )
+    })?;
+
+    Ok(BgmVolumeStmt { volume })
 }
 /// 解析一行 `let` 变量定义语句。
 /// 语法：`let name = value`，其中 value 可以是带引号的字符串或裸数字。

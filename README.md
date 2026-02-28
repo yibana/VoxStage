@@ -167,6 +167,18 @@ cargo run -p vox-cli -- examples/dialog.vox
 cargo run -p vox-cli -- examples/control_flow.vox
 ```
 
+### 日志输出
+
+CLI 支持通过 `--log-level` 控制日志级别：
+
+```bash
+cargo run -p vox-cli -- --log-level info  examples/hello.vox
+cargo run -p vox-cli -- --log-level debug examples/hello.vox
+cargo run -p vox-cli -- --log-level trace examples/hello.vox
+```
+
+可选值：`error` / `warn` / `info` / `debug` / `trace`。也可以通过环境变量 `RUST_LOG` 覆盖默认过滤规则。
+
 - 示例脚本说明：
   - `examples/hello.vox`：演示基础的 `model/role/speak/sleep`，以及不同语速的连续合成与播放。
   - `examples/dialog.vox`：演示 `let` 变量定义与 `${var}` 字符串插值构造简单对话。

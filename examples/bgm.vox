@@ -1,0 +1,22 @@
+model bert_vits2 {
+  type = "http"
+  endpoint = "http://localhost:5000"
+}
+
+role Girl {
+  model = bert_vits2
+  speed = "1.2"
+  language = "ZH"
+  speaker_id = "0"
+}
+speak Girl "背景音测试"
+bgm "crates/sounds/laugh1.wav"
+bgm_volume 0.5
+speak Girl "有背景音时的台词"
+bgm_pause
+speak Girl "暂停 BGM 后的台词"
+bgm_volume 2
+bgm_resume
+sleep 10000
+bgm_stop
+speak Girl "结束背景音"
