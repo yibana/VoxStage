@@ -29,7 +29,7 @@ for 3 {
 }
 
 # while 循环（这里演示一次性退出）
-let keep_running = "true"
+let keep_running = true
 
 while keep_running {
   let user_name = "小红"

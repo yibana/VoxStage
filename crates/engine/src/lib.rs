@@ -18,7 +18,7 @@ use tokio::time::{sleep, Duration};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 use vox_core::{AudioStream, SynthesisRequest, TtsError, TtsProvider};
-use vox_dsl::{parse_script, CondOp, IfCondition, Item, ModelDef, Script, SpeakStmt, SleepStmt};
+use vox_dsl::{parse_script, Expr, Item, ModelDef, Script, SpeakStmt, SleepStmt};
 
 pub use model_manager::ModelManager;
 
@@ -83,6 +83,14 @@ struct ExecContext {
     vars: HashMap<String, String>,
 }
 
+/// 表达式求值后得到的运行时值（仅在执行引擎内部使用）。
+#[derive(Debug, Clone)]
+enum Value {
+    Str(String),
+    Int(i64),
+    Bool(bool),
+}
+
 /// 从源码构建执行上下文：解析 DSL，并收集角色与变量定义。
 fn build_exec_context(src: &str) -> Result<ExecContext, EngineError> {
     let script = parse_script(src)?;
@@ -102,7 +110,8 @@ fn build_exec_context(src: &str) -> Result<ExecContext, EngineError> {
                 );
             }
             Item::Let(let_stmt) => {
-                vars.insert(let_stmt.name.clone(), let_stmt.value.clone());
+                let value = eval_expr(&let_stmt.expr, &vars);
+                vars.insert(let_stmt.name.clone(), value_to_string(&value));
             }
             _ => {}
         }
@@ -177,8 +186,9 @@ where
                     );
                 }
                 Item::Let(let_stmt) => {
+                    let value = eval_expr(&let_stmt.expr, &ctx.vars);
                     ctx.vars
-                        .insert(let_stmt.name.clone(), let_stmt.value.clone());
+                        .insert(let_stmt.name.clone(), value_to_string(&value));
                 }
                 Item::Speak(speak) => {
                     let (model_name, audio) = execute_speak(manager, ctx, speak).await?;
@@ -191,17 +201,20 @@ where
                     // 流式执行时 BGM 不产生音频输出，由命令模式 + runner 处理。
                 }
                 Item::If(if_stmt) => {
-                    if eval_if_condition(&ctx.vars, &if_stmt.condition) {
+                    let cond = eval_expr(&if_stmt.condition, &ctx.vars);
+                    if value_to_bool(&cond) {
                         exec_items_streaming(manager, ctx, &if_stmt.body, on_output).await?;
                     }
                 }
                 Item::For(for_stmt) => {
-                    for _ in 0..for_stmt.times {
+                    let times_val = eval_expr(&for_stmt.times, &ctx.vars);
+                    let times = value_to_u64(&times_val);
+                    for _ in 0..times {
                         exec_items_streaming(manager, ctx, &for_stmt.body, on_output).await?;
                     }
                 }
                 Item::While(while_stmt) => {
-                    while is_var_true(&ctx.vars, &while_stmt.var) {
+                    while value_to_bool(&eval_expr(&while_stmt.condition, &ctx.vars)) {
                         exec_items_streaming(manager, ctx, &while_stmt.body, on_output).await?;
                     }
                 }
@@ -279,8 +292,9 @@ where
                     );
                 }
                 Item::Let(let_stmt) => {
+                    let value = eval_expr(&let_stmt.expr, &ctx.vars);
                     ctx.vars
-                        .insert(let_stmt.name.clone(), let_stmt.value.clone());
+                        .insert(let_stmt.name.clone(), value_to_string(&value));
                 }
                 Item::Speak(speak) => {
                     let (model_name, audio) = execute_speak(manager, ctx, speak).await?;
@@ -319,17 +333,20 @@ where
                     on_command(EngineCommand::BgmStop).await;
                 }
                 Item::If(if_stmt) => {
-                    if eval_if_condition(&ctx.vars, &if_stmt.condition) {
+                    let cond = eval_expr(&if_stmt.condition, &ctx.vars);
+                    if value_to_bool(&cond) {
                         exec_items_to_commands(manager, ctx, &if_stmt.body, on_command).await?;
                     }
                 }
                 Item::For(for_stmt) => {
-                    for _ in 0..for_stmt.times {
+                    let times_val = eval_expr(&for_stmt.times, &ctx.vars);
+                    let times = value_to_u64(&times_val);
+                    for _ in 0..times {
                         exec_items_to_commands(manager, ctx, &for_stmt.body, on_command).await?;
                     }
                 }
                 Item::While(while_stmt) => {
-                    while is_var_true(&ctx.vars, &while_stmt.var) {
+                    while value_to_bool(&eval_expr(&while_stmt.condition, &ctx.vars)) {
                         exec_items_to_commands(manager, ctx, &while_stmt.body, on_command).await?;
                     }
                 }
@@ -452,19 +469,118 @@ async fn execute_sleep(stmt: &SleepStmt) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// 判断变量是否为逻辑真（字符串值为 "true" 时，忽略大小写）。
-fn is_var_true(vars: &HashMap<String, String>, name: &str) -> bool {
-    vars.get(name)
-        .map(|v| v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+/// 将运行时值转为字符串，供变量表或日志使用。
+fn value_to_string(v: &Value) -> String {
+    match v {
+        Value::Str(s) => s.clone(),
+        Value::Int(i) => i.to_string(),
+        Value::Bool(b) => b.to_string(),
+    }
 }
 
-/// 计算 if 条件是否为真。
-fn eval_if_condition(vars: &HashMap<String, String>, cond: &IfCondition) -> bool {
-    let current = vars.get(&cond.var).cloned().unwrap_or_default();
-    match cond.op {
-        CondOp::Eq => current == cond.value,
-        CondOp::Neq => current != cond.value,
+/// 将运行时值转换为布尔，用于 if / while 条件判断。
+fn value_to_bool(v: &Value) -> bool {
+    match v {
+        Value::Bool(b) => *b,
+        Value::Int(i) => *i != 0,
+        Value::Str(s) => s.eq_ignore_ascii_case("true"),
+    }
+}
+
+/// 将运行时值转换为循环次数（负数或无法解析时视为 0）。
+fn value_to_u64(v: &Value) -> u64 {
+    match v {
+        Value::Int(i) if *i > 0 => *i as u64,
+        Value::Int(_) => 0,
+        Value::Bool(b) => {
+            if *b {
+                1
+            } else {
+                0
+            }
+        }
+        Value::Str(s) => s.parse::<u64>().unwrap_or(0),
+    }
+}
+
+/// 将字符串解析为运行时值。
+fn parse_literal(s: &str) -> Value {
+    // 布尔
+    if s.eq_ignore_ascii_case("true") {
+        return Value::Bool(true);
+    }
+    if s.eq_ignore_ascii_case("false") {
+        return Value::Bool(false);
+    }
+    // 整数
+    if let Ok(i) = s.parse::<i64>() {
+        return Value::Int(i);
+    }
+    // 其它一律当作字符串
+    Value::Str(s.to_string())
+}
+
+/// 表达式求值。
+fn eval_expr(expr: &Expr, vars: &HashMap<String, String>) -> Value {
+    match expr {
+        Expr::Literal(s) => parse_literal(s),
+        Expr::Var(name) => {
+            if let Some(v) = vars.get(name) {
+                parse_literal(v)
+            } else {
+                Value::Str(String::new())
+            }
+        }
+        Expr::Unary { op, expr } => {
+            let v = eval_expr(expr, vars);
+            match op {
+                vox_dsl::UnaryOp::Not => Value::Bool(!value_to_bool(&v)),
+                vox_dsl::UnaryOp::Neg => match v {
+                    Value::Int(i) => Value::Int(-i),
+                    other => other,
+                },
+            }
+        }
+        Expr::Binary { op, left, right } => {
+            let lv = eval_expr(left, vars);
+            let rv = eval_expr(right, vars);
+            use vox_dsl::BinaryOp::*;
+            match op {
+                // 算术：目前只对 Int 生效，其它类型返回左值原样。
+                Add => match (lv, rv) {
+                    (Value::Int(a), Value::Int(b)) => Value::Int(a + b),
+                    (a, _) => a,
+                },
+                Sub => match (lv, rv) {
+                    (Value::Int(a), Value::Int(b)) => Value::Int(a - b),
+                    (a, _) => a,
+                },
+                Mul => match (lv, rv) {
+                    (Value::Int(a), Value::Int(b)) => Value::Int(a * b),
+                    (a, _) => a,
+                },
+                Div => match (lv, rv) {
+                    (Value::Int(_), Value::Int(0)) => Value::Int(0),
+                    (Value::Int(a), Value::Int(b)) => Value::Int(a / b),
+                    (a, _) => a,
+                },
+                Mod => match (lv, rv) {
+                    (Value::Int(_), Value::Int(0)) => Value::Int(0),
+                    (Value::Int(a), Value::Int(b)) => Value::Int(a % b),
+                    (a, _) => a,
+                },
+                // 比较：为保持与旧逻辑一致，统一按字符串比较。
+                Eq => Value::Bool(value_to_string(&lv) == value_to_string(&rv)),
+                Neq => Value::Bool(value_to_string(&lv) != value_to_string(&rv)),
+                Lt => Value::Bool(value_to_string(&lv) < value_to_string(&rv)),
+                Lte => Value::Bool(value_to_string(&lv) <= value_to_string(&rv)),
+                Gt => Value::Bool(value_to_string(&lv) > value_to_string(&rv)),
+                Gte => Value::Bool(value_to_string(&lv) >= value_to_string(&rv)),
+                // 逻辑运算。
+                And => Value::Bool(value_to_bool(&lv) && value_to_bool(&rv)),
+                Or => Value::Bool(value_to_bool(&lv) || value_to_bool(&rv)),
+            }
+        }
     }
 }
 

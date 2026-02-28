@@ -1,0 +1,76 @@
+########################
+# 表达式能力演示脚本   #
+########################
+
+model gpt_sovits_v2 {
+  type = "http"
+  provider = "gpt_sovits_v2"
+  endpoint = "http://127.0.0.1:9880"
+}
+
+role Wolf {
+  model = gpt_sovits_v2
+  language = "zh"
+  ref_audio_path = "laugh1.wav"
+  prompt_lang = "zh"
+  prompt_text = "大家好啊，哈哈，我是从来不带节奏的血狼破军，今天来点大家想看的东西。"
+  text_split_method = "cut5"
+  batch_size = "1"
+  media_type = "wav"
+  streaming_mode = "false"
+}
+
+########################
+# 1. let + 算术表达式  #
+########################
+
+let base_score = 50
+let bonus      = 10
+let score      = base_score + bonus * 2
+
+########################
+# 2. if + 比较/逻辑    #
+########################
+
+let lang = "ZH"
+
+if score >= 90 && lang == "ZH" {
+  speak Wolf "恭喜，你是满分选手。"
+}
+
+if score >= 60 && score < 90 {
+  speak Wolf "这是中上水平。"
+}
+
+if !(score >= 60) {
+  speak Wolf "这句不会被执行。"
+}
+
+########################
+# 3. for 使用表达式    #
+########################
+
+let base_loop = 1
+let extra     = 1
+
+for base_loop + extra {
+  speak Wolf "for 循环里的一句话。"
+}
+
+########################
+# 4. while 条件表达式  #
+########################
+
+let keep_running = true
+let i = 0
+let max_loop = 2
+
+# 目前 DSL 还没有赋值语句，只演示语法结构；
+# while 条件支持任意表达式，例如：i < max_loop && keep_running。
+while i < max_loop && keep_running {
+  speak Wolf "while 循环中的一句话（当前不会改变 i，只演示语法）。"
+  let keep_running = false
+  sleep 300
+  # 将来可以支持：i = i + 1
+}
+

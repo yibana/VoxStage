@@ -19,8 +19,8 @@
 use std::collections::HashMap;
 
 use crate::ast::{
-    BgmPlayStmt, BgmVolumeStmt, CondOp, IfCondition, IfStmt, Item, LetStmt, ModelDef, RoleDef,
-    Script, SpeakStmt, SleepStmt, ForStmt, WhileStmt,
+    BgmPlayStmt, BgmVolumeStmt, BinaryOp, Expr, IfStmt, Item, LetStmt, ModelDef, RoleDef, Script,
+    SpeakStmt, SleepStmt, ForStmt, WhileStmt, UnaryOp,
 };
 use crate::error::ParseError;
 
@@ -129,42 +129,9 @@ fn parse_if<'a>(
     Ok(IfStmt { condition, body })
 }
 
-/// 解析 if 条件部分：`var == "value"` 或 `var != "value"`。
-fn parse_if_condition(line_idx: usize, rest: &str) -> Result<IfCondition, ParseError> {
-    let parts: Vec<&str> = rest.split_whitespace().collect();
-    if parts.len() < 3 {
-        return Err(ParseError::new(
-            line_idx + 1,
-            1,
-            "if 条件语法错误，期望形如 `if var == \"value\"`".to_string(),
-        ));
-    }
-
-    let var = parts[0].to_string();
-    let op_str = parts[1];
-    let op = match op_str {
-        "==" => CondOp::Eq,
-        "!=" => CondOp::Neq,
-        _ => {
-            return Err(ParseError::new(
-                line_idx + 1,
-                1,
-                format!("不支持的 if 运算符: {op_str}"),
-            ))
-        }
-    };
-
-    // 将 value 的剩余部分拼成一个字符串再去掉引号。
-    let value_raw = parts[2..].join(" ");
-    let value = if (value_raw.starts_with('"') && value_raw.ends_with('"'))
-        || (value_raw.starts_with('\'') && value_raw.ends_with('\''))
-    {
-        value_raw[1..value_raw.len() - 1].to_string()
-    } else {
-        value_raw
-    };
-
-    Ok(IfCondition { var, op, value })
+/// 解析 if 条件部分：支持完整表达式语法（算术、比较、逻辑、括号等）。
+fn parse_if_condition(line_idx: usize, rest: &str) -> Result<Expr, ParseError> {
+    parse_expr_from_str(line_idx, rest)
 }
 
 /// 解析 `for` 次数循环块。
@@ -190,17 +157,9 @@ fn parse_for<'a>(
         return Err(ParseError::new(
             first_line_idx + 1,
             1,
-            "for 语句缺少次数参数".to_string(),
+            "for 语句缺少次数表达式".to_string(),
         ));
     }
-
-    let times: u64 = rest.parse().map_err(|_| {
-        ParseError::new(
-            first_line_idx + 1,
-            1,
-            format!("无法解析 for 次数: {rest}"),
-        )
-    })?;
 
     if !has_open_brace {
         if let Some((idx, line)) = lines.next() {
@@ -220,9 +179,13 @@ fn parse_for<'a>(
         }
     }
 
+    let times_expr = parse_expr_from_str(first_line_idx, rest)?;
     let body = parse_block_items(lines, src, first_line_idx, "for")?;
 
-    Ok(ForStmt { times, body })
+    Ok(ForStmt {
+        times: times_expr,
+        body,
+    })
 }
 
 /// 解析 `while` 循环块。
@@ -248,11 +211,11 @@ fn parse_while<'a>(
         return Err(ParseError::new(
             first_line_idx + 1,
             1,
-            "while 语句缺少条件变量名".to_string(),
+            "while 语句缺少条件表达式".to_string(),
         ));
     }
 
-    let var = rest.to_string();
+    let condition = parse_expr_from_str(first_line_idx, rest)?;
 
     if !has_open_brace {
         if let Some((idx, line)) = lines.next() {
@@ -274,7 +237,7 @@ fn parse_while<'a>(
 
     let body = parse_block_items(lines, src, first_line_idx, "while")?;
 
-    Ok(WhileStmt { var, body })
+    Ok(WhileStmt { condition, body })
 }
 
 /// 解析一个 `{ ... }` 代码块内部的语句列表，直到遇到对应的 `}`。
@@ -422,25 +385,38 @@ fn parse_let(line_idx: usize, line: &str) -> Result<LetStmt, ParseError> {
         .ok_or_else(|| ParseError::new(line_idx + 1, 1, "无效的 let 语句".to_string()))?
         .trim();
 
-    if let Some((name, value)) = parse_key_value(rest) {
-        if name.is_empty() {
-            return Err(ParseError::new(
-                line_idx + 1,
-                1,
-                "let 语句缺少变量名".to_string(),
-            ));
-        }
-        Ok(LetStmt {
-            name: name.to_string(),
-            value,
-        })
-    } else {
-        Err(ParseError::new(
+    let parts: Vec<&str> = rest.splitn(2, '=').collect();
+    if parts.len() != 2 {
+        return Err(ParseError::new(
             line_idx + 1,
             1,
             format!("无法解析 let 语句: {rest}"),
-        ))
+        ));
     }
+
+    let name = parts[0].trim();
+    if name.is_empty() {
+        return Err(ParseError::new(
+            line_idx + 1,
+            1,
+            "let 语句缺少变量名".to_string(),
+        ));
+    }
+
+    let expr_src = parts[1].trim();
+    if expr_src.is_empty() {
+        return Err(ParseError::new(
+            line_idx + 1,
+            1,
+            "let 语句缺少右侧表达式".to_string(),
+        ));
+    }
+
+    let expr = parse_expr_from_str(line_idx, expr_src)?;
+    Ok(LetStmt {
+        name: name.to_string(),
+        expr,
+    })
 }
 
 /// 解析一行 `sleep` 语句。
@@ -781,5 +757,267 @@ fn parse_key_value(line: &str) -> Option<(&str, String)> {
     }
 
     Some((key, value))
+}
+
+// ---------------------------------------------------------------------------
+// 表达式解析：支持字面量、变量、算术、比较、逻辑、括号与一元运算
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+enum Token {
+    Ident(String),
+    Number(String),
+    Str(String),
+    Op(String),
+    LParen,
+    RParen,
+}
+
+fn tokenize_expr(line_idx: usize, src: &str) -> Result<Vec<Token>, ParseError> {
+    let mut tokens = Vec::new();
+    let mut chars = src.chars().peekable();
+
+    while let Some(ch) = chars.peek().cloned() {
+        if ch.is_whitespace() {
+            chars.next();
+            continue;
+        }
+
+        if ch == '"' || ch == '\'' {
+            // 字符串字面量。
+            let quote = ch;
+            chars.next(); // 跳过引号
+            let mut value = String::new();
+            while let Some(c) = chars.next() {
+                if c == quote {
+                    break;
+                } else {
+                    value.push(c);
+                }
+            }
+            tokens.push(Token::Str(value));
+            continue;
+        }
+
+        if ch.is_ascii_digit() {
+            let mut num = String::new();
+            while let Some(c) = chars.peek().cloned() {
+                if c.is_ascii_digit() {
+                    num.push(c);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            tokens.push(Token::Number(num));
+            continue;
+        }
+
+        if ch.is_ascii_alphabetic() || ch == '_' {
+            let mut ident = String::new();
+            while let Some(c) = chars.peek().cloned() {
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    ident.push(c);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            tokens.push(Token::Ident(ident));
+            continue;
+        }
+
+        // 操作符与括号。
+        // 先尝试双字符操作符：&& || == != <= >=
+        if let Some(next) = chars.clone().nth(1) {
+            let two = format!("{ch}{next}");
+            if matches!(two.as_str(), "&&" | "||" | "==" | "!=" | "<=" | ">=") {
+                tokens.push(Token::Op(two));
+                chars.next();
+                chars.next();
+                continue;
+            }
+        }
+
+        // 单字符操作符或括号。
+        match ch {
+            '(' => {
+                tokens.push(Token::LParen);
+                chars.next();
+            }
+            ')' => {
+                tokens.push(Token::RParen);
+                chars.next();
+            }
+            '+' | '-' | '*' | '/' | '%' | '<' | '>' | '!' => {
+                tokens.push(Token::Op(ch.to_string()));
+                chars.next();
+            }
+            _ => {
+                return Err(ParseError::new(
+                    line_idx + 1,
+                    1,
+                    format!("无法解析的表达式字符: {}", ch),
+                ));
+            }
+        }
+    }
+
+    Ok(tokens)
+}
+
+fn op_precedence(op: &str) -> Option<(u8, bool)> {
+    // (优先级, 是否右结合)
+    match op {
+        "||" => Some((1, false)),
+        "&&" => Some((2, false)),
+        "==" | "!=" => Some((3, false)),
+        "<" | "<=" | ">" | ">=" => Some((4, false)),
+        "+" | "-" => Some((5, false)),
+        "*" | "/" | "%" => Some((6, false)),
+        _ => None,
+    }
+}
+
+fn parse_expr_from_str(line_idx: usize, src: &str) -> Result<Expr, ParseError> {
+    let tokens = tokenize_expr(line_idx, src)?;
+    if tokens.is_empty() {
+        return Err(ParseError::new(
+            line_idx + 1,
+            1,
+            "空表达式".to_string(),
+        ));
+    }
+    let mut pos = 0;
+    let expr = parse_expr_bp(line_idx, &tokens, &mut pos, 0)?;
+    if pos != tokens.len() {
+        return Err(ParseError::new(
+            line_idx + 1,
+            1,
+            format!("无法完整解析表达式: {}", src),
+        ));
+    }
+    Ok(expr)
+}
+
+fn parse_expr_bp(
+    line_idx: usize,
+    tokens: &[Token],
+    pos: &mut usize,
+    min_prec: u8,
+) -> Result<Expr, ParseError> {
+    // 解析前缀部分（字面量、变量、括号、一元运算）。
+    let mut left = parse_prefix(line_idx, tokens, pos)?;
+
+    while *pos < tokens.len() {
+        let op = match &tokens[*pos] {
+            Token::Op(op) => op.clone(),
+            _ => break,
+        };
+
+        if let Some((prec, right_assoc)) = op_precedence(&op) {
+            if prec < min_prec {
+                break;
+            }
+            *pos += 1; // 消费操作符
+            let next_min_prec = if right_assoc { prec } else { prec + 1 };
+            let right = parse_expr_bp(line_idx, tokens, pos, next_min_prec)?;
+            let bin_op = match op.as_str() {
+                "+" => BinaryOp::Add,
+                "-" => BinaryOp::Sub,
+                "*" => BinaryOp::Mul,
+                "/" => BinaryOp::Div,
+                "%" => BinaryOp::Mod,
+                "==" => BinaryOp::Eq,
+                "!=" => BinaryOp::Neq,
+                "<" => BinaryOp::Lt,
+                "<=" => BinaryOp::Lte,
+                ">" => BinaryOp::Gt,
+                ">=" => BinaryOp::Gte,
+                "&&" => BinaryOp::And,
+                "||" => BinaryOp::Or,
+                _ => {
+                    return Err(ParseError::new(
+                        line_idx + 1,
+                        1,
+                        format!("不支持的二元运算符: {}", op),
+                    ))
+                }
+            };
+            left = Expr::Binary {
+                op: bin_op,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        } else {
+            break;
+        }
+    }
+
+    Ok(left)
+}
+
+fn parse_prefix(
+    line_idx: usize,
+    tokens: &[Token],
+    pos: &mut usize,
+) -> Result<Expr, ParseError> {
+    if *pos >= tokens.len() {
+        return Err(ParseError::new(
+            line_idx + 1,
+            1,
+            "意外结束的表达式".to_string(),
+        ));
+    }
+
+    match &tokens[*pos] {
+        Token::Op(op) if op == "!" || op == "-" => {
+            let op_kind = if op == "!" { UnaryOp::Not } else { UnaryOp::Neg };
+            *pos += 1;
+            let expr = parse_prefix(line_idx, tokens, pos)?;
+            Ok(Expr::Unary {
+                op: op_kind,
+                expr: Box::new(expr),
+            })
+        }
+        Token::LParen => {
+            *pos += 1; // 跳过 '('
+            let expr = parse_expr_bp(line_idx, tokens, pos, 0)?;
+            if *pos >= tokens.len() || !matches!(tokens[*pos], Token::RParen) {
+                return Err(ParseError::new(
+                    line_idx + 1,
+                    1,
+                    "缺少右括号 ')'".to_string(),
+                ));
+            }
+            *pos += 1; // 跳过 ')'
+            Ok(expr)
+        }
+        Token::Number(n) => {
+            let lit = Expr::Literal(n.clone());
+            *pos += 1;
+            Ok(lit)
+        }
+        Token::Str(s) => {
+            let lit = Expr::Literal(s.clone());
+            *pos += 1;
+            Ok(lit)
+        }
+        Token::Ident(name) => {
+            let ident = name.clone();
+            *pos += 1;
+            // 特判 true/false 为字面量布尔，避免被当作变量。
+            if ident.eq_ignore_ascii_case("true") || ident.eq_ignore_ascii_case("false") {
+                Ok(Expr::Literal(ident))
+            } else {
+                Ok(Expr::Var(ident))
+            }
+        }
+        other => Err(ParseError::new(
+            line_idx + 1,
+            1,
+            format!("无法解析的表达式起始: {:?}", other),
+        )),
+    }
 }
 

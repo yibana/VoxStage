@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tokio::time::Duration;
 
 use tracing::{error, info};
-use vox_audio::PlaybackContext;
+use vox_audio::{play_audio_blocking, PlaybackContext};
 use vox_engine::{compile_script_to_channel, EngineCommand, EngineError, ModelManager};
 
 /// 根据 path_or_url 加载音频字节。当前仅支持本地文件路径；以 `http://` / `https://` 开头的 URL 暂不支持。
@@ -23,9 +23,8 @@ fn load_audio_bytes(path_or_url: &str) -> Result<Vec<u8>, String> {
 ///
 /// - 内部会：
 ///   1. 创建 BGM 控制器与命令通道；
-///   2. 并发运行两个异步任务：
-///      - producer：`compile_script_to_channel` 按顺序推入命令；
-///      - consumer：即时消费命令，`SpeakAudio` 立刻开始播放、`Sleep` 控制间隔、BGM 命令转调 `BgmController`。
+///   2. 并发运行 producer 与 consumer：producer 推命令，consumer 消费并播放。
+///   TTS 在 `spawn_blocking` 中调用 `play_audio_blocking`，避免阻塞 consumer，从而 producer 可持续推命令。
 pub async fn run_script_with_audio(
     manager: &ModelManager,
     src: &str,
@@ -43,9 +42,13 @@ pub async fn run_script_with_audio(
             match cmd {
                 EngineCommand::SpeakAudio { model_name, data } => {
                     info!("模型 {} 合成完成，开始播放音频……", model_name);
-                    match ctx.play_tts_blocking(&data) {
-                        Ok(()) => info!("音频播放完成。"),
-                        Err(err) => error!("音频播放失败: {:?}", err),
+                    // 在 spawn_blocking 中播放，避免阻塞 consumer 任务，否则 producer 无法继续推命令。
+                    let data = data.clone();
+                    let res = tokio::task::spawn_blocking(move || play_audio_blocking(&data)).await;
+                    match res {
+                        Ok(Ok(())) => info!("音频播放完成。"),
+                        Ok(Err(err)) => error!("音频播放失败: {:?}", err),
+                        Err(join_err) => error!("音频播放任务崩溃: {:?}", join_err),
                     }
                 }
                 EngineCommand::Sleep { duration_ms } => {

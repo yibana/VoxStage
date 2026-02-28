@@ -1,7 +1,7 @@
 //! vox-dsl 开发阶段基础解析测试。
 //! 这些测试只关注 AST 结构是否按预期构造，不涉及执行与模型调用。
 
-use vox_dsl::{parse_script, Item};
+use vox_dsl::{parse_script, Item, Expr, BinaryOp};
 
 /// 基础脚本解析：model + role + speak。
 #[test]
@@ -127,7 +127,10 @@ let user_name = "小明"
     match &script.items[0] {
         Item::Let(stmt) => {
             assert_eq!(stmt.name, "user_name");
-            assert_eq!(stmt.value, "小明");
+            match &stmt.expr {
+                Expr::Literal(v) => assert_eq!(v, "小明"),
+                other => panic!("let 表达式应为 Literal，小明，实际为: {:?}", other),
+            }
         }
         other => panic!("首个语句应为 LetStmt，实际为: {:?}", other),
     }
@@ -160,21 +163,39 @@ while keep_running {
 
     match &script.items[2] {
         Item::If(stmt) => {
-            assert_eq!(stmt.condition.var, "lang");
+            match &stmt.condition {
+                Expr::Binary { op, left, right } => {
+                    assert_eq!(*op, BinaryOp::Eq);
+                    match (&**left, &**right) {
+                        (Expr::Var(name), Expr::Literal(val)) => {
+                            assert_eq!(name, "lang");
+                            assert_eq!(val, "ZH");
+                        }
+                        other => panic!("if 条件结构不符合预期: {:?}", other),
+                    }
+                }
+                other => panic!("if 条件应为 Binary 表达式，实际为: {:?}", other),
+            }
         }
         other => panic!("第三个语句应为 IfStmt，实际为: {:?}", other),
     }
 
     match &script.items[3] {
         Item::For(stmt) => {
-            assert_eq!(stmt.times, 3);
+            match &stmt.times {
+                Expr::Literal(v) => assert_eq!(v, "3"),
+                other => panic!("for 次数字段应为 Literal(\"3\")，实际为: {:?}", other),
+            }
         }
         other => panic!("第四个语句应为 ForStmt，实际为: {:?}", other),
     }
 
     match &script.items[4] {
         Item::While(stmt) => {
-            assert_eq!(stmt.var, "keep_running");
+            match &stmt.condition {
+                Expr::Var(name) => assert_eq!(name, "keep_running"),
+                other => panic!("while 条件应为 Var(\"keep_running\")，实际为: {:?}", other),
+            }
         }
         other => panic!("第五个语句应为 WhileStmt，实际为: {:?}", other),
     }

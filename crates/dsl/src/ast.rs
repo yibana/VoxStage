@@ -39,6 +39,60 @@ pub enum Item {
     BgmStop,
 }
 
+// ---------------------------------------------------------------------------
+// 表达式系统：为 let / if / for / while 提供统一的表达式表示
+// ---------------------------------------------------------------------------
+
+/// 表达式节点。
+#[derive(Debug, Clone)]
+pub enum Expr {
+    /// 字面量，例如数字、字符串、布尔等（具体类型由执行层解释）。
+    Literal(String),
+    /// 变量引用，例如 `foo`。
+    Var(String),
+    /// 一元运算，例如 `!flag` 或 `-x`。
+    Unary {
+        op: UnaryOp,
+        expr: Box<Expr>,
+    },
+    /// 二元运算，例如 `a + b`、`x == 1`、`a && b` 等。
+    Binary {
+        op: BinaryOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+}
+
+/// 一元运算符。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOp {
+    /// 逻辑非：`!expr`。
+    Not,
+    /// 数值取反：`-expr`。
+    Neg,
+}
+
+/// 二元运算符。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryOp {
+    // 算术运算。
+    Add, // +
+    Sub, // -
+    Mul, // *
+    Div, // /
+    Mod, // %
+    // 比较运算。
+    Eq,  // ==
+    Neq, // !=
+    Lt,  // <
+    Lte, // <=
+    Gt,  // >
+    Gte, // >=
+    // 逻辑运算。
+    And, // &&
+    Or,  // ||
+}
+
 /// `bgm "path_or_url"` 或 `bgm "path" loop`。
 #[derive(Debug, Clone)]
 pub struct BgmPlayStmt {
@@ -92,8 +146,8 @@ pub struct SpeakStmt {
 pub struct LetStmt {
     /// 变量名称。
     pub name: String,
-    /// 原始字符串值（不区分类型，数值/字符串由执行层自行解析）。
-    pub value: String,
+    /// 右侧表达式（可以是字面量、变量或简单运算）。
+    pub expr: Expr,
 }
 
 /// `sleep` 语句。
@@ -104,34 +158,20 @@ pub struct SleepStmt {
     pub duration_ms: u64,
 }
 
-/// if 条件运算符。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CondOp {
-    Eq,  // ==
-    Neq, // !=
-}
-
-/// if 条件：形如 `var == "value"` 或 `var != "value"`。
-#[derive(Debug, Clone)]
-pub struct IfCondition {
-    pub var: String,
-    pub op: CondOp,
-    pub value: String,
-}
-
 /// if 语句。
 /// MVP 阶段只支持 if，无 else。
 #[derive(Debug, Clone)]
 pub struct IfStmt {
-    pub condition: IfCondition,
+    /// 条件表达式，例如 `score >= 60 && lang == "ZH"`。
+    pub condition: Expr,
     pub body: Vec<Item>,
 }
 
 /// for 语句，按次数循环。
 #[derive(Debug, Clone)]
 pub struct ForStmt {
-    /// 循环次数。
-    pub times: u64,
+    /// 循环次数表达式，例如 `3` 或 `loop_count + 2`。
+    pub times: Expr,
     /// 循环体语句。
     pub body: Vec<Item>,
 }
@@ -139,8 +179,8 @@ pub struct ForStmt {
 /// while 语句，基于变量字符串值判断是否继续循环。
 #[derive(Debug, Clone)]
 pub struct WhileStmt {
-    /// 控制循环的变量名，变量为 "true"（忽略大小写）时继续循环。
-    pub var: String,
+    /// 条件表达式，求值为逻辑真时继续循环。
+    pub condition: Expr,
     /// 循环体语句。
     pub body: Vec<Item>,
 }
