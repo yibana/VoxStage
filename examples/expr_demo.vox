@@ -24,13 +24,24 @@ role Wolf {
 # 1. let + 算术表达式  #
 ########################
 
-let base_score = 50
+let base_score = 70
 let bonus      = 10
 let score      = base_score + bonus * 2
+let val = score + 2 * 10 -1
 
 ########################
 # 2. if + 比较/逻辑    #
 ########################
+
+speak Wolf "计算值等于${val}"
+
+let i = 0
+let max = 3
+
+while i < max {
+  speak Wolf "第 ${i} 次循环。"
+  set i = i + 1
+}
 
 let lang = "ZH"
 

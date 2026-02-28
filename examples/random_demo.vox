@@ -1,0 +1,96 @@
+############################
+# 随机 & 内置函数 演示脚本  #
+############################
+
+model gpt_sovits_v2 {
+  type = "http"
+  provider = "gpt_sovits_v2"
+  endpoint = "http://127.0.0.1:9880"
+  model_id = "demo"
+}
+
+role Narrator {
+  model = gpt_sovits_v2
+  language = "zh"
+  ref_audio_path = "laugh1.wav"
+  prompt_lang = "zh"
+  prompt_text = "大家好啊，哈哈，我是从来不带节奏的血狼破军，今天来点大家想看的东西。"
+  text_split_method = "cut5"
+  batch_size = "1"
+  media_type = "wav"
+}
+
+########################
+# 1. 根据时间问好      #
+########################
+
+let hour = time_hour()
+
+if hour < 12 {
+  let greet = "早上好"
+  speak Narrator "${greet}，现在是 ${hour} 点。"
+}
+
+if hour >= 12 && hour < 18 {
+  let greet = "下午好"
+  speak Narrator "${greet}，现在是 ${hour} 点。"
+}
+
+if hour >= 18 {
+  let greet = "晚上好"
+  speak Narrator "${greet}，现在是 ${hour} 点。"
+}
+
+sleep 800
+
+########################
+# 2. 随机选择台词      #
+########################
+
+let line = rand_choice("今天我们来做一个小小的随机演示。", "随机性，让每次运行都略有不同。", "你听到的这句，是从多个候选中随机挑选出来的。")
+
+speak Narrator "${line}"
+sleep 800
+
+########################
+# 3. 随机次数 & 掷骰子 #
+########################
+
+let dice = rand_int(1, 6)
+speak Narrator "我掷了一次骰子，点数是 ${dice}。"
+sleep 600
+
+let repeat_times = rand_int(1, 3)
+speak Narrator "接下来这句话会重复 ${repeat_times} 次。"
+
+let i = 0
+while i < repeat_times {
+  speak Narrator "这是随机重复的语句。"
+  sleep 400
+  set i = i + 1
+}
+
+########################
+# 4. 随机 BGM 片段     #
+########################
+
+let bgm_path = rand_choice("crates/sounds/845921_16094772-lq.mp3", "crates/sounds/846519_9034501-lq.mp3")
+
+bgm "${bgm_path}" loop
+bgm_volume 0.3
+
+let play_bgm_line = rand_bool()
+
+if play_bgm_line {
+  speak Narrator "我随机决定，打开一小段背景音乐来陪你听完这个示例。"
+}
+
+if !play_bgm_line {
+  speak Narrator "这一次，我们也许不需要太多背景音，只是轻轻地铺陈在后面。"
+}
+
+sleep 5000
+
+bgm_stop
+speak Narrator "随机演示脚本播放完毕，我们下次再见。"
+

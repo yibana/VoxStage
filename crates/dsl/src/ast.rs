@@ -29,6 +29,8 @@ pub enum Item {
     For(ForStmt),
     /// 条件循环。
     While(WhileStmt),
+    /// 赋值语句：更新已有变量或创建新变量。
+    Set(SetStmt),
     /// 背景音：播放。
     BgmPlay(BgmPlayStmt),
     /// 背景音：音量。
@@ -60,6 +62,11 @@ pub enum Expr {
         op: BinaryOp,
         left: Box<Expr>,
         right: Box<Expr>,
+    },
+    /// 函数调用，例如 `rand_int(1, 10)` 或 `rand_choice("a", "b")`。
+    Call {
+        name: String,
+        args: Vec<Expr>,
     },
 }
 
@@ -147,6 +154,16 @@ pub struct LetStmt {
     /// 变量名称。
     pub name: String,
     /// 右侧表达式（可以是字面量、变量或简单运算）。
+    pub expr: Expr,
+}
+
+/// `set` 赋值语句：更新已有变量或创建新变量。
+/// 语法示例：`set user_name = "小红"` 或 `set speed_fast = speed_fast + 0.1`。
+#[derive(Debug, Clone)]
+pub struct SetStmt {
+    /// 变量名称。
+    pub name: String,
+    /// 右侧表达式。
     pub expr: Expr,
 }
 

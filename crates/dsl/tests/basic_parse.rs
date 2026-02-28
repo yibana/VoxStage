@@ -136,6 +136,28 @@ let user_name = "小明"
     }
 }
 
+/// set 赋值语句解析：set user_name = "小红"
+#[test]
+fn parse_set_stmt() {
+    let src = r#"
+set user_name = "小红"
+"#;
+
+    let script = parse_script(src).expect("parse_script should succeed");
+    assert_eq!(script.items.len(), 1);
+
+    match &script.items[0] {
+        Item::Set(stmt) => {
+            assert_eq!(stmt.name, "user_name");
+            match &stmt.expr {
+                Expr::Literal(v) => assert_eq!(v, "小红"),
+                other => panic!("set 表达式应为 Literal，小红，实际为: {:?}", other),
+            }
+        }
+        other => panic!("首个语句应为 SetStmt，实际为: {:?}", other),
+    }
+}
+
 /// if / for / while 语句解析（结构校验）。
 #[test]
 fn parse_control_flow_stmts() {

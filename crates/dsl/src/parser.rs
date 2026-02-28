@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use crate::ast::{
     BgmPlayStmt, BgmVolumeStmt, BinaryOp, Expr, IfStmt, Item, LetStmt, ModelDef, RoleDef, Script,
-    SpeakStmt, SleepStmt, ForStmt, WhileStmt, UnaryOp,
+    SetStmt, SpeakStmt, SleepStmt, ForStmt, WhileStmt, UnaryOp,
 };
 use crate::error::ParseError;
 
@@ -59,6 +59,9 @@ pub fn parse_script(src: &str) -> Result<Script, ParseError> {
         } else if trimmed.starts_with("while ") {
             let while_stmt = parse_while(line_idx, trimmed, &mut lines, src)?;
             items.push(Item::While(while_stmt));
+        } else if trimmed.starts_with("set ") {
+            let set_stmt = parse_set(line_idx, trimmed)?;
+            items.push(Item::Set(set_stmt));
         } else if trimmed.starts_with("bgm ") {
             let stmt = parse_bgm_play(line_idx, trimmed)?;
             items.push(Item::BgmPlay(stmt));
@@ -282,6 +285,9 @@ fn parse_block_items<'a>(
         } else if trimmed.starts_with("while ") {
             let while_stmt = parse_while(idx, trimmed, lines, src)?;
             items.push(Item::While(while_stmt));
+        } else if trimmed.starts_with("set ") {
+            let set_stmt = parse_set(idx, trimmed)?;
+            items.push(Item::Set(set_stmt));
         } else if trimmed.starts_with("bgm ") {
             let stmt = parse_bgm_play(idx, trimmed)?;
             items.push(Item::BgmPlay(stmt));
@@ -414,6 +420,49 @@ fn parse_let(line_idx: usize, line: &str) -> Result<LetStmt, ParseError> {
 
     let expr = parse_expr_from_str(line_idx, expr_src)?;
     Ok(LetStmt {
+        name: name.to_string(),
+        expr,
+    })
+}
+
+/// 解析一行 `set` 赋值语句。
+/// 语法：`set name = expr`。
+fn parse_set(line_idx: usize, line: &str) -> Result<SetStmt, ParseError> {
+    let trimmed = line.trim_start();
+    let rest = trimmed
+        .strip_prefix("set")
+        .ok_or_else(|| ParseError::new(line_idx + 1, 1, "无效的 set 语句".to_string()))?
+        .trim();
+
+    let parts: Vec<&str> = rest.splitn(2, '=').collect();
+    if parts.len() != 2 {
+        return Err(ParseError::new(
+            line_idx + 1,
+            1,
+            format!("无法解析 set 语句: {rest}"),
+        ));
+    }
+
+    let name = parts[0].trim();
+    if name.is_empty() {
+        return Err(ParseError::new(
+            line_idx + 1,
+            1,
+            "set 语句缺少变量名".to_string(),
+        ));
+    }
+
+    let expr_src = parts[1].trim();
+    if expr_src.is_empty() {
+        return Err(ParseError::new(
+            line_idx + 1,
+            1,
+            "set 语句缺少右侧表达式".to_string(),
+        ));
+    }
+
+    let expr = parse_expr_from_str(line_idx, expr_src)?;
+    Ok(SetStmt {
         name: name.to_string(),
         expr,
     })
@@ -771,6 +820,7 @@ enum Token {
     Op(String),
     LParen,
     RParen,
+    Comma,
 }
 
 fn tokenize_expr(line_idx: usize, src: &str) -> Result<Vec<Token>, ParseError> {
@@ -839,7 +889,7 @@ fn tokenize_expr(line_idx: usize, src: &str) -> Result<Vec<Token>, ParseError> {
             }
         }
 
-        // 单字符操作符或括号。
+        // 单字符操作符、逗号或括号。
         match ch {
             '(' => {
                 tokens.push(Token::LParen);
@@ -851,6 +901,10 @@ fn tokenize_expr(line_idx: usize, src: &str) -> Result<Vec<Token>, ParseError> {
             }
             '+' | '-' | '*' | '/' | '%' | '<' | '>' | '!' => {
                 tokens.push(Token::Op(ch.to_string()));
+                chars.next();
+            }
+            ',' => {
+                tokens.push(Token::Comma);
                 chars.next();
             }
             _ => {
@@ -1006,7 +1060,59 @@ fn parse_prefix(
         Token::Ident(name) => {
             let ident = name.clone();
             *pos += 1;
-            // 特判 true/false 为字面量布尔，避免被当作变量。
+            // 函数调用：ident '(' args? ')'
+            if *pos < tokens.len() {
+                if let Token::LParen = tokens[*pos] {
+                    *pos += 1; // 跳过 '('
+                    let mut args = Vec::new();
+                    // 解析零个或多个参数表达式，使用逗号分隔。
+                    if *pos < tokens.len() && !matches!(tokens[*pos], Token::RParen) {
+                        loop {
+                            let arg = parse_expr_bp(line_idx, tokens, pos, 0)?;
+                            args.push(arg);
+                            if *pos >= tokens.len() {
+                                return Err(ParseError::new(
+                                    line_idx + 1,
+                                    1,
+                                    "函数调用缺少右括号 ')'".to_string(),
+                                ));
+                            }
+                            match &tokens[*pos] {
+                                Token::Comma => {
+                                    *pos += 1;
+                                    continue;
+                                }
+                                Token::RParen => {
+                                    *pos += 1;
+                                    break;
+                                }
+                                other => {
+                                    return Err(ParseError::new(
+                                        line_idx + 1,
+                                        1,
+                                        format!("函数调用参数列表语法错误: {:?}", other),
+                                    ));
+                                }
+                            }
+                        }
+                    } else {
+                        // 无参数：期望紧跟右括号。
+                        if *pos >= tokens.len() || !matches!(tokens[*pos], Token::RParen) {
+                            return Err(ParseError::new(
+                                line_idx + 1,
+                                1,
+                                "函数调用缺少右括号 ')'".to_string(),
+                            ));
+                        }
+                        *pos += 1;
+                    }
+                    return Ok(Expr::Call {
+                        name: ident,
+                        args,
+                    });
+                }
+            }
+            // 非调用场景：标识符要么是布尔字面量，要么是变量引用。
             if ident.eq_ignore_ascii_case("true") || ident.eq_ignore_ascii_case("false") {
                 Ok(Expr::Literal(ident))
             } else {

@@ -1,0 +1,84 @@
+############################
+# 《洛神赋》朗读 + 背景音效 #
+############################
+
+# 说明：
+# - 使用 gpt_sovits_v2 朗读《洛神赋》片段。
+# - 使用 mp3 作为 BGM，路径可根据本地文件调整。
+
+model gpt_sovits_v2 {
+  type = "http"
+  provider = "gpt_sovits_v2"
+  endpoint = "http://127.0.0.1:9880"
+}
+
+role Narrator {
+  model = gpt_sovits_v2
+
+  # 语言与参考音频
+  language = "zh"
+  ref_audio_path = "laugh1.wav"
+  prompt_lang = "zh"
+  prompt_text = "大家好啊，哈哈，我是从来不带节奏的血狼破军，今天来点大家想看的东西。"
+
+  # GPT-SoVITS 相关参数
+  text_split_method = "cut5"
+  batch_size = "1"
+  media_type = "wav"
+  streaming_mode = "false"
+
+  # 语速/音量/音高
+  speed = "1.0"
+  volume = "1.0"
+  pitch = "1.0"
+}
+
+########################
+# 背景音乐设置          #
+########################
+
+let bgm_path = "crates\sounds\846519_9034501-lq.mp3"
+
+# 播放循环 BGM，音量稍低以避免盖过人声
+bgm "${bgm_path}" loop
+bgm_volume 1
+
+########################
+# 《洛神赋》朗读片段    #
+########################
+
+speak Narrator "黄初三年，余朝京师，还济洛川，古人有言，斯水之神，名曰宓妃。"
+sleep 800
+
+speak Narrator "余从京域，言归东藩。背伊阙，越轘辕，经通谷，陵景山。"
+sleep 800
+
+speak Narrator "日既西倾，车殆马烦。尔乃税驾乎蘅皋，秣驷乎芝田。"
+sleep 800
+
+speak Narrator "于是精移神骇，忽焉思散。俯则未察，仰以殊观。"
+sleep 800
+
+speak Narrator "见一美人，若游龙乘云，飘飘乎凌波微步，罗袜生尘。"
+sleep 1000
+
+speak Narrator "华容婀娜，令我忘餐。皓质呈露，芳泽无偏。肩若削成，腰如约素。"
+sleep 1000
+
+speak Narrator "延颈秀项，皓齿内鲜。云髻峨峨，修眉联娟。丹唇外朗，皓齿内鲜。"
+sleep 1000
+
+speak Narrator "瑰姿艳逸，仪静体闲。柔情绰态，媚于语言。"
+sleep 1200
+
+########################
+# 尾声与收束          #
+########################
+
+bgm_volume 0.2
+speak Narrator "斯乃洛水之神，宓妃之容。虽世有其文，未若亲闻其声也。"
+sleep 1200
+
+bgm_stop
+speak Narrator "《洛神赋》朗读到此结束。"
+

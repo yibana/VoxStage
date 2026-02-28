@@ -12,13 +12,16 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::{Local, Timelike};
+use rand::random;
 use thiserror::Error;
 use tokio::time::{sleep, Duration};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 use vox_core::{AudioStream, SynthesisRequest, TtsError, TtsProvider};
-use vox_dsl::{parse_script, Expr, Item, ModelDef, Script, SpeakStmt, SleepStmt};
+use vox_dsl::{parse_script, Expr, Item, ModelDef, Script, SetStmt, SpeakStmt, SleepStmt};
 
 pub use model_manager::ModelManager;
 
@@ -113,6 +116,11 @@ fn build_exec_context(src: &str) -> Result<ExecContext, EngineError> {
                 let value = eval_expr(&let_stmt.expr, &vars);
                 vars.insert(let_stmt.name.clone(), value_to_string(&value));
             }
+            Item::Set(set_stmt) => {
+                // 顶层 set 直接作用于“全局变量表”。
+                let value = eval_expr(&set_stmt.expr, &vars);
+                vars.insert(set_stmt.name.clone(), value_to_string(&value));
+            }
             _ => {}
         }
     }
@@ -189,6 +197,15 @@ where
                     let value = eval_expr(&let_stmt.expr, &ctx.vars);
                     ctx.vars
                         .insert(let_stmt.name.clone(), value_to_string(&value));
+                }
+                Item::Set(set_stmt) => {
+                    apply_set(&mut ctx.vars, set_stmt);
+                }
+                Item::Set(set_stmt) => {
+                    apply_set(&mut ctx.vars, set_stmt);
+                }
+                Item::Set(set_stmt) => {
+                    apply_set(&mut ctx.vars, set_stmt);
                 }
                 Item::Speak(speak) => {
                     let (model_name, audio) = execute_speak(manager, ctx, speak).await?;
@@ -296,6 +313,9 @@ where
                     ctx.vars
                         .insert(let_stmt.name.clone(), value_to_string(&value));
                 }
+                Item::Set(set_stmt) => {
+                    apply_set(&mut ctx.vars, set_stmt);
+                }
                 Item::Speak(speak) => {
                     let (model_name, audio) = execute_speak(manager, ctx, speak).await?;
                     if let AudioStream::Full(data) = audio {
@@ -349,6 +369,9 @@ where
                     while value_to_bool(&eval_expr(&while_stmt.condition, &ctx.vars)) {
                         exec_items_to_commands(manager, ctx, &while_stmt.body, on_command).await?;
                     }
+                }
+                Item::BgmPlay(_) | Item::BgmVolume(_) | Item::BgmPause | Item::BgmResume | Item::BgmStop => {
+                    // 已在上方分支处理，这里仅为保持匹配完整性。
                 }
             }
         }
@@ -581,6 +604,78 @@ fn eval_expr(expr: &Expr, vars: &HashMap<String, String>) -> Value {
                 Or => Value::Bool(value_to_bool(&lv) || value_to_bool(&rv)),
             }
         }
+        Expr::Call { name, args } => {
+            let evaled_args: Vec<Value> = args.iter().map(|e| eval_expr(e, vars)).collect();
+            eval_builtin(name, &evaled_args)
+        }
+    }
+}
+
+/// 应用一次 set 赋值：如果变量已存在则就地更新，否则在当前表中创建。
+fn apply_set(vars: &mut HashMap<String, String>, set: &SetStmt) {
+    let value = eval_expr(&set.expr, vars);
+    vars.insert(set.name.clone(), value_to_string(&value));
+}
+
+fn current_unix_ts() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_secs() as i64
+}
+
+fn eval_builtin(name: &str, args: &[Value]) -> Value {
+    match name {
+        // 时间相关：使用本地时间（Local::now），拆出小时/分钟/秒。
+        "now" => Value::Int(current_unix_ts()),
+        "time_hour" => {
+            let now = Local::now();
+            Value::Int(now.hour() as i64)
+        }
+        "time_minute" => {
+            let now = Local::now();
+            Value::Int(now.minute() as i64)
+        }
+        "time_second" => {
+            let now = Local::now();
+            Value::Int(now.second() as i64)
+        }
+
+        // 随机数相关。
+        "rand" => {
+            let v: i64 = (random::<u64>() % 1_000_000_000) as i64;
+            Value::Int(v)
+        }
+        "rand_int" => {
+            let (mut min, mut max) = match args {
+                [Value::Int(a), Value::Int(b), ..] => (*a, *b),
+                [Value::Int(a)] => (0, *a),
+                _ => (0, 100),
+            };
+            if max < min {
+                std::mem::swap(&mut min, &mut max);
+            }
+            if min == max {
+                return Value::Int(min);
+            }
+            let span = (max - min + 1) as u64;
+            let v = min + (random::<u64>() % span) as i64;
+            Value::Int(v)
+        }
+        "rand_bool" => {
+            Value::Bool(random::<bool>())
+        }
+        "rand_choice" => {
+            if args.is_empty() {
+                return Value::Str(String::new());
+            }
+            let len = args.len().max(1) as u64;
+            let idx = (random::<u64>() % len) as usize;
+            args[idx].clone()
+        }
+
+        // 未知内置函数：返回空字符串，避免 panic。
+        _ => Value::Str(String::new()),
     }
 }
 
