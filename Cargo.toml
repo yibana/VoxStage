@@ -7,6 +7,7 @@ members = [
     "crates/dsl",
     "crates/engine",
     "crates/runner",
+    "apps/voxstage-gui/src-tauri",
 ]
 resolver = "2"
 
