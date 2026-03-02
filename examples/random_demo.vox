@@ -74,7 +74,7 @@ while i < repeat_times {
 # 4. 随机 BGM 片段     #
 ########################
 
-let bgm_path = rand_choice("crates/sounds/845921_16094772-lq.mp3", "crates/sounds/846519_9034501-lq.mp3")
+let bgm_path = rand_choice("sounds/845921_16094772-lq.mp3", "sounds/846519_9034501-lq.mp3")
 
 bgm "${bgm_path}" loop
 bgm_volume 0.3

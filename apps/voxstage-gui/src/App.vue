@@ -1,32 +1,43 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { ref } from "vue";
+import ConfigView from "./components/ConfigView.vue";
 
-const bridgeMsg = ref("");
-
-onMounted(async () => {
-  try {
-    bridgeMsg.value = await invoke<string>("greet", { name: "VoxStage" });
-  } catch (e) {
-    bridgeMsg.value = `调用失败: ${e}`;
-  }
-});
+type Tab = "config" | "script";
+const activeTab = ref<Tab>("config");
 </script>
 
 <template>
   <div class="app">
     <header class="topbar">
       <h1 class="topbar-title">VoxStage</h1>
+      <nav class="topbar-tabs">
+        <button
+          type="button"
+          class="tab"
+          :class="{ active: activeTab === 'config' }"
+          @click="activeTab = 'config'"
+        >
+          配置
+        </button>
+        <button
+          type="button"
+          class="tab"
+          :class="{ active: activeTab === 'script' }"
+          @click="activeTab = 'script'"
+        >
+          剧本
+        </button>
+      </nav>
       <div class="topbar-actions">
         <span class="placeholder">运行</span>
         <span class="placeholder">保存</span>
       </div>
     </header>
     <main class="main">
-      <p class="placeholder-text">配置 | 剧本（Phase 2 实现）</p>
-      <p class="bridge-ok" v-if="bridgeMsg">
-        Rust 桥接正常：{{ bridgeMsg }}
-      </p>
+      <ConfigView v-show="activeTab === 'config'" />
+      <div v-show="activeTab === 'script'" class="script-placeholder">
+        <p>剧本编排（Phase 3 实现）</p>
+      </div>
     </main>
   </div>
 </template>
@@ -47,12 +58,37 @@ onMounted(async () => {
   background: #1a1a2e;
   color: #eee;
   flex-shrink: 0;
+  gap: 1rem;
 }
 
 .topbar-title {
   margin: 0;
   font-size: 1rem;
   font-weight: 600;
+}
+
+.topbar-tabs {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.tab {
+  padding: 0.35rem 0.75rem;
+  background: transparent;
+  border: none;
+  color: #aaa;
+  cursor: pointer;
+  font-size: 0.875rem;
+  border-radius: 4px;
+}
+
+.tab:hover {
+  color: #eee;
+}
+
+.tab.active {
+  background: #2a2a4e;
+  color: #eee;
 }
 
 .topbar-actions {
@@ -70,16 +106,13 @@ onMounted(async () => {
   flex: 1;
   padding: 1.5rem;
   background: #f6f6f6;
+  overflow: auto;
 }
 
-.placeholder-text {
+.script-placeholder {
   color: #666;
-  margin: 0 0 1rem 0;
 }
-
-.bridge-ok {
-  font-size: 0.875rem;
-  color: #0d7377;
+.script-placeholder p {
   margin: 0;
 }
 </style>
@@ -101,7 +134,7 @@ onMounted(async () => {
   .main {
     background: #2f2f2f;
   }
-  .placeholder-text {
+  .script-placeholder {
     color: #aaa;
   }
 }
