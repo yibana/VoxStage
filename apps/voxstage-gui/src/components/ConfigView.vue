@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import type { AppConfig, ModelEntry, RoleEntry } from "../types/config";
+import type { AppConfig } from "../types/config";
 import { emptyModel, emptyRole } from "../types/config";
 
 const config = ref<AppConfig>({ models: [], roles: [] });
