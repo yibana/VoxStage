@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { ScriptItemType, ScriptItem } from "../types/script";
 import type { RoleEntry, AppConfig } from "../types/config";
 import { createItem, toVox } from "../types/script";
+import ExprInput from "./ExprInput.vue";
 
 const items = ref<ScriptItem[]>([]);
 const roleNames = ref<string[]>([]);
@@ -280,15 +281,18 @@ function clearScript() {
 const runError = ref<string | null>(null);
 const isRunning = ref(false);
 const isPaused = ref(false);
+/** 是否循环运行整个剧本 */
+const loopRun = ref(false);
 async function runScript() {
   runError.value = null;
   isRunning.value = true;
   isPaused.value = false;
   activeSourceIndex.value = null;
   try {
+    const loopFlag = loopRun.value;
     if (mode.value === "code") {
       const voxText = codeText.value;
-      await invoke("run_script", { voxText });
+      await invoke("run_script", { voxText, loopRun: loopFlag });
     } else {
       const cfg = await invoke<AppConfig>("get_config");
       const voxText = toVox(cfg, items.value);
@@ -297,7 +301,7 @@ async function runScript() {
         voxText,
       });
       items.value = parsed;
-      await invoke("run_script", { voxText });
+      await invoke("run_script", { voxText, loopRun: loopFlag });
     }
   } catch (e) {
     runError.value = String(e);
@@ -334,29 +338,6 @@ async function stopScript() {
     isRunning.value = false;
     isPaused.value = false;
   }
-}
-
-/** 在指定 ScriptItem 的指定字段末尾追加文本（简单插入，不处理光标位置） */
-function appendToField(
-  item: ScriptItem,
-  field: "expr" | "condition" | "times",
-  text: string,
-) {
-  const anyItem = item as any;
-  const cur = (anyItem[field] as string | undefined) ?? "";
-  anyItem[field] = cur ? `${cur}${text}` : text;
-}
-
-function insertVarToExpr(item: ScriptItem, field: "expr" | "condition" | "times", name: string) {
-  appendToField(item, field, name);
-}
-
-function insertBuiltinToExpr(
-  item: ScriptItem,
-  field: "expr" | "condition" | "times",
-  snippet: string,
-) {
-  appendToField(item, field, snippet);
 }
 
 function labelOfType(t: ScriptItemType): string {
@@ -418,10 +399,12 @@ let unlistenProgress: (() => void) | null = null;
 let unlistenFinished: (() => void) | null = null;
 
 onMounted(async () => {
+  // 初始加载：角色列表 + 剧本草稿
   loadRoles();
   loadScriptDraft();
 
   try {
+    // 运行进度事件
     unlistenProgress = await listen<number>("script-progress", (event) => {
       console.log("script-progress event", event.payload);
       if (typeof event.payload === "number") {
@@ -435,6 +418,8 @@ onMounted(async () => {
         activeRowIndex.value = null;
       }
     });
+
+    // 运行结束事件
     unlistenFinished = await listen("script-finished", () => {
       console.log("script-finished event");
       activeSourceIndex.value = null;
@@ -442,8 +427,17 @@ onMounted(async () => {
       isRunning.value = false;
       isPaused.value = false;
     });
+
+    // 配置变更事件（例如在配置页新增/删除角色）
+    await listen("config-changed", () => {
+      console.log("config-changed event, reload roles");
+      loadRoles();
+    });
   } catch (e) {
-    console.error("listen script-progress/script-finished failed", e);
+    console.error(
+      "listen script-progress/script-finished/config-changed failed",
+      e,
+    );
   }
 });
 
@@ -480,6 +474,14 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
       </span>
       <span class="toolbar-spacer"></span>
       <template v-if="mode === 'edit'">
+        <label class="run-loop-toggle">
+          <input
+            type="checkbox"
+            v-model="loopRun"
+            :disabled="isRunning"
+          />
+          <span>循环</span>
+        </label>
         <button
           type="button"
           class="btn-run"
@@ -598,135 +600,32 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
           </template>
 
           <template v-else-if="item.type === 'if'">
-            <input
+            <ExprInput
               v-model="item.condition"
-              class="input text-input"
-              placeholder="条件表达式，如 score &gt;= 60"
+              :variables="availableVars"
+              :builtins="builtinFunctions"
+              placeholder="条件表达式，如 score >= 60"
             />
-            <div class="expr-helper">
-              <span class="expr-helper-label">插入：</span>
-              <select
-                class="expr-helper-select"
-                @change="(e) => {
-                  const el = e.target as HTMLSelectElement;
-                  if (el.value) {
-                    insertVarToExpr(item, 'condition', el.value);
-                    el.value = '';
-                  }
-                }"
-              >
-                <option value="">变量</option>
-                <option v-for="v in availableVars" :key="`if-var-${v}`" :value="v">
-                  {{ v }}
-                </option>
-              </select>
-              <select
-                class="expr-helper-select"
-                @change="(e) => {
-                  const el = e.target as HTMLSelectElement;
-                  if (el.value) {
-                    const fn = builtinFunctions.find((b) => b.name === el.value);
-                    if (fn) insertBuiltinToExpr(item, 'condition', fn.snippet);
-                    el.value = '';
-                  }
-                }"
-              >
-                <option value="">内置函数</option>
-                <option v-for="fn in builtinFunctions" :key="`if-fn-${fn.name}`" :value="fn.name">
-                  {{ fn.name }}
-                </option>
-              </select>
-            </div>
           </template>
 
           <template v-else-if="item.type === 'for'">
-            <input
+            <ExprInput
               v-model="item.times"
-              class="input number-input"
+              :variables="availableVars"
+              :builtins="builtinFunctions"
               placeholder="次数表达式，如 3 或 n + 1"
             />
             <span class="label">次</span>
-            <div class="expr-helper">
-              <span class="expr-helper-label">插入：</span>
-              <select
-                class="expr-helper-select"
-                @change="(e) => {
-                  const el = e.target as HTMLSelectElement;
-                  if (el.value) {
-                    insertVarToExpr(item, 'times', el.value);
-                    el.value = '';
-                  }
-                }"
-              >
-                <option value="">变量</option>
-                <option v-for="v in availableVars" :key="`for-var-${v}`" :value="v">
-                  {{ v }}
-                </option>
-              </select>
-              <select
-                class="expr-helper-select"
-                @change="(e) => {
-                  const el = e.target as HTMLSelectElement;
-                  if (el.value) {
-                    const fn = builtinFunctions.find((b) => b.name === el.value);
-                    if (fn) insertBuiltinToExpr(item, 'times', fn.snippet);
-                    el.value = '';
-                  }
-                }"
-              >
-                <option value="">内置函数</option>
-                <option v-for="fn in builtinFunctions" :key="`for-fn-${fn.name}`" :value="fn.name">
-                  {{ fn.name }}
-                </option>
-              </select>
-            </div>
           </template>
 
           <template v-else-if="item.type === 'while'">
-            <input
+            <ExprInput
               v-model="item.condition"
-              class="input text-input"
+              :variables="availableVars"
+              :builtins="builtinFunctions"
               placeholder="条件表达式，如 running"
             />
             <span class="label">时</span>
-            <div class="expr-helper">
-              <span class="expr-helper-label">插入：</span>
-              <select
-                class="expr-helper-select"
-                @change="(e) => {
-                  const el = e.target as HTMLSelectElement;
-                  if (el.value) {
-                    insertVarToExpr(item, 'condition', el.value);
-                    el.value = '';
-                  }
-                }"
-              >
-                <option value="">变量</option>
-                <option v-for="v in availableVars" :key="`while-var-${v}`" :value="v">
-                  {{ v }}
-                </option>
-              </select>
-              <select
-                class="expr-helper-select"
-                @change="(e) => {
-                  const el = e.target as HTMLSelectElement;
-                  if (el.value) {
-                    const fn = builtinFunctions.find((b) => b.name === el.value);
-                    if (fn) insertBuiltinToExpr(item, 'condition', fn.snippet);
-                    el.value = '';
-                  }
-                }"
-              >
-                <option value="">内置函数</option>
-                <option
-                  v-for="fn in builtinFunctions"
-                  :key="`while-fn-${fn.name}`"
-                  :value="fn.name"
-                >
-                  {{ fn.name }}
-                </option>
-              </select>
-            </div>
           </template>
 
           <template v-else-if="item.type === 'let'">
@@ -736,45 +635,12 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
               placeholder="变量名"
             />
             <span class="label">=</span>
-            <input
+            <ExprInput
               v-model="item.expr"
-              class="input text-input"
+              :variables="availableVars"
+              :builtins="builtinFunctions"
               placeholder="表达式，如 1 或 score + 1"
             />
-            <div class="expr-helper">
-              <span class="expr-helper-label">插入：</span>
-              <select
-                class="expr-helper-select"
-                @change="(e) => {
-                  const el = e.target as HTMLSelectElement;
-                  if (el.value) {
-                    insertVarToExpr(item, 'expr', el.value);
-                    el.value = '';
-                  }
-                }"
-              >
-                <option value="">变量</option>
-                <option v-for="v in availableVars" :key="`let-var-${v}`" :value="v">
-                  {{ v }}
-                </option>
-              </select>
-              <select
-                class="expr-helper-select"
-                @change="(e) => {
-                  const el = e.target as HTMLSelectElement;
-                  if (el.value) {
-                    const fn = builtinFunctions.find((b) => b.name === el.value);
-                    if (fn) insertBuiltinToExpr(item, 'expr', fn.snippet);
-                    el.value = '';
-                  }
-                }"
-              >
-                <option value="">内置函数</option>
-                <option v-for="fn in builtinFunctions" :key="`let-fn-${fn.name}`" :value="fn.name">
-                  {{ fn.name }}
-                </option>
-              </select>
-            </div>
           </template>
 
           <template v-else-if="item.type === 'set'">
@@ -784,45 +650,12 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
               placeholder="变量名"
             />
             <span class="label">=</span>
-            <input
+            <ExprInput
               v-model="item.expr"
-              class="input text-input"
+              :variables="availableVars"
+              :builtins="builtinFunctions"
               placeholder="表达式，如 x + 1"
             />
-            <div class="expr-helper">
-              <span class="expr-helper-label">插入：</span>
-              <select
-                class="expr-helper-select"
-                @change="(e) => {
-                  const el = e.target as HTMLSelectElement;
-                  if (el.value) {
-                    insertVarToExpr(item, 'expr', el.value);
-                    el.value = '';
-                  }
-                }"
-              >
-                <option value="">变量</option>
-                <option v-for="v in availableVars" :key="`set-var-${v}`" :value="v">
-                  {{ v }}
-                </option>
-              </select>
-              <select
-                class="expr-helper-select"
-                @change="(e) => {
-                  const el = e.target as HTMLSelectElement;
-                  if (el.value) {
-                    const fn = builtinFunctions.find((b) => b.name === el.value);
-                    if (fn) insertBuiltinToExpr(item, 'expr', fn.snippet);
-                    el.value = '';
-                  }
-                }"
-              >
-                <option value="">内置函数</option>
-                <option v-for="fn in builtinFunctions" :key="`set-fn-${fn.name}`" :value="fn.name">
-                  {{ fn.name }}
-                </option>
-              </select>
-            </div>
           </template>
 
           <template v-else-if="item.type === 'bgm_play'">
@@ -1081,6 +914,19 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
 
 .btn-run-stop:hover {
   background: #dc2626;
+}
+
+.run-loop-toggle {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.8rem;
+  margin-right: 0.5rem;
+  gap: 0.25rem;
+}
+
+.run-loop-toggle input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
 }
 
 .script-row-active {

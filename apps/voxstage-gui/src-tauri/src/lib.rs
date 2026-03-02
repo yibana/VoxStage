@@ -39,13 +39,36 @@ pub struct RoleEntry {
     pub params: std::collections::HashMap<String, String>,
 }
 
-/// 全局配置：模型列表 + 角色列表
+/// 窗口状态（用于记住 GUI 窗口大小/位置）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WindowState {
+    /// 窗口宽度（像素，逻辑坐标）
+    #[serde(default)]
+    pub width: f64,
+    /// 窗口高度（像素，逻辑坐标）
+    #[serde(default)]
+    pub height: f64,
+    /// 是否最大化
+    #[serde(default)]
+    pub maximized: bool,
+    /// 左上角 X 坐标（逻辑坐标）
+    #[serde(default)]
+    pub x: f64,
+    /// 左上角 Y 坐标（逻辑坐标）
+    #[serde(default)]
+    pub y: f64,
+}
+
+/// 全局配置：模型列表 + 角色列表 + 窗口状态
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
     pub models: Vec<ModelEntry>,
     #[serde(default)]
     pub roles: Vec<RoleEntry>,
+    /// GUI 主窗口状态
+    #[serde(default)]
+    pub window: WindowState,
 }
 
 /// 与前端 ScriptItem 一致的剧本项 DTO（用于 Code → 编辑 解析结果）
@@ -507,7 +530,11 @@ fn save_config(app: tauri::AppHandle, config: AppConfig) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let s = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    fs::write(&path, s).map_err(|e| e.to_string())
+    fs::write(&path, s).map_err(|e| e.to_string())?;
+
+    // 配置保存成功后，通知前端刷新（包括角色列表等）
+    let _ = app.emit("config-changed", ());
+    Ok(())
 }
 
 /// 仅返回角色列表（供前端下拉等使用）
@@ -574,6 +601,8 @@ async fn run_script(
     app: tauri::AppHandle,
     vox_text: String,
     playback: tauri::State<'_, PlaybackControl>,
+    // 是否循环运行整个剧本（前端勾选“循环”复选框时为 true）
+    loop_run: Option<bool>,
 ) -> Result<(), String> {
     // 每次运行前确保处于“未暂停 / 未停止”状态
     playback.pause_flag.store(false, Ordering::SeqCst);
@@ -581,37 +610,56 @@ async fn run_script(
 
     let pause_flag = playback.pause_flag.clone();
     let stop_flag = playback.stop_flag.clone();
+    let enable_loop = loop_run.unwrap_or(false);
     let app_handle = app.clone();
 
     // 关键：把阻塞式播放逻辑放到后台线程，避免卡住 WebView/UI。
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        // 由于 ModelManager 构建一次即可复用，这里提前构建，循环中重复调用 runner。
         let mut manager = ModelManager::new();
         register_providers_from_script(&mut manager, &vox_text, |def: &ModelDef| {
             model_def_to_provider(def)
         })
         .map_err(|e: EngineError| e.to_string())?;
 
-        // 进度回调：每当 runner 即将执行一条命令时，向前端广播当前 source_index。
-        let app_for_progress = app_handle.clone();
-        let progress_cb: Arc<dyn Fn(u32) + Send + Sync> = Arc::new(move |index: u32| {
-            let _ = app_for_progress.emit("script-progress", index);
-        });
-
         let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-        let result = rt
-            .block_on(run_script_with_audio(
-                &manager,
-                &vox_text,
-                Some(pause_flag),
-                Some(stop_flag),
-                Some(progress_cb),
-            ))
-            .map_err(|e| e.to_string());
 
-        // 不论成功或失败，都通知前端脚本已结束，便于清理高亮与状态。
+        loop {
+            // 每轮运行前，如果已被请求停止，则直接退出循环。
+            if stop_flag.load(Ordering::SeqCst) {
+                break;
+            }
+
+            // 进度回调：每当 runner 即将执行一条命令时，向前端广播当前 source_index。
+            let app_for_progress = app_handle.clone();
+            let progress_cb: Arc<dyn Fn(u32) + Send + Sync> =
+                Arc::new(move |index: u32| {
+                    let _ = app_for_progress.emit("script-progress", index);
+                });
+
+            let run_result = rt
+                .block_on(run_script_with_audio(
+                    &manager,
+                    &vox_text,
+                    Some(pause_flag.clone()),
+                    Some(stop_flag.clone()),
+                    Some(progress_cb),
+                ))
+                .map_err(|e| e.to_string());
+
+            // 如果本轮执行出错，或者没有开启循环模式，就结束（向前端发 finished）。
+            if run_result.is_err() || !enable_loop {
+                let _ = app_handle.emit("script-finished", ());
+                return run_result;
+            }
+
+            // 循环模式：本轮成功且未被停止，则重新开始下一轮；
+            // 此时前端仍然可以通过 stop_flag 请求中止。
+        }
+
+        // 被 stop_flag 打断时，也要告知前端已结束。
         let _ = app_handle.emit("script-finished", ());
-
-        result
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -645,6 +693,118 @@ pub fn run() {
         .manage(PlaybackControl {
             pause_flag: Arc::new(AtomicBool::new(false)),
             stop_flag: Arc::new(AtomicBool::new(false)),
+        })
+        .setup(|app| {
+            // 启动时按配置还原窗口大小/位置/状态
+            if let Ok(cfg) = get_config(app.handle().clone()) {
+                if let Some(window) = app.get_webview_window("main") {
+                    if cfg.window.maximized {
+                        // 如果记录了最大化，则优先最大化
+                        let _ = window.maximize();
+                    } else {
+                        use tauri::{LogicalPosition, LogicalSize};
+                        // 获取当前显示器信息，用于做边界判断和居中
+                        if let Ok(monitor_opt) = window.current_monitor() {
+                            if let Some(monitor) = monitor_opt {
+                                let m_size = monitor.size();
+                                let m_pos = monitor.position();
+
+                                // 计算目标宽高：优先使用上次记录，否则用屏幕 80%
+                                let mut width = if cfg.window.width > 0.0 {
+                                    cfg.window.width
+                                } else {
+                                    (m_size.width as f64 * 0.8).round()
+                                };
+                                let mut height = if cfg.window.height > 0.0 {
+                                    cfg.window.height
+                                } else {
+                                    (m_size.height as f64 * 0.8).round()
+                                };
+
+                                // 限制不超过屏幕大小的 90%，避免撑出屏幕
+                                let max_w = (m_size.width as f64 * 0.9).round();
+                                let max_h = (m_size.height as f64 * 0.9).round();
+                                if width > max_w {
+                                    width = max_w;
+                                }
+                                if height > max_h {
+                                    height = max_h;
+                                }
+                                let _ = window.set_size(LogicalSize { width, height });
+
+                                // 位置：如果有记录且仍在屏幕范围内，就用记录的；否则居中
+                                let mut x = cfg.window.x;
+                                let mut y = cfg.window.y;
+
+                                // 允许轻微偏出一点点，防止因为任务栏等导致判断过严
+                                let inset = 50.0_f64;
+                                let min_x = m_pos.x as f64 - inset;
+                                let min_y = m_pos.y as f64 - inset;
+                                let max_x =
+                                    m_pos.x as f64 + m_size.width as f64 - width + inset;
+                                let max_y =
+                                    m_pos.y as f64 + m_size.height as f64 - height + inset;
+
+                                let has_saved_pos = x != 0.0 || y != 0.0;
+                                let use_saved = has_saved_pos
+                                    && x >= min_x
+                                    && y >= min_y
+                                    && x <= max_x
+                                    && y <= max_y;
+
+                                if !use_saved {
+                                    // 计算居中坐标
+                                    x = m_pos.x as f64
+                                        + (m_size.width as f64 - width) / 2.0;
+                                    y = m_pos.y as f64
+                                        + (m_size.height as f64 - height) / 2.0;
+                                }
+
+                                let _ = window.set_position(LogicalPosition { x, y });
+                            } else {
+                                // 获取不到显示器时，退化为简单居中
+                                let _ = window.center();
+                            }
+                        } else {
+                            // 获取不到显示器时，退化为简单居中
+                            let _ = window.center();
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            use tauri::WindowEvent;
+            match event {
+                // 当窗口大小或位置改变时，记录当前状态到 config.json
+                WindowEvent::Resized(_) | WindowEvent::Moved(_) => {
+                    let app = window.app_handle();
+
+                    // 先读出当前配置
+                    if let Ok(mut cfg) = get_config(app.clone()) {
+                        if let Ok(is_max) = window.is_maximized() {
+                            cfg.window.maximized = is_max;
+                        }
+                        // 如果不是最大化，则记录当前窗口大小和位置
+                        if !cfg.window.maximized {
+                            if let Ok(size) = window.outer_size() {
+                                cfg.window.width = size.width as f64;
+                                cfg.window.height = size.height as f64;
+                            }
+                            if let Ok(pos) = window.outer_position() {
+                                cfg.window.x = pos.x as f64;
+                                cfg.window.y = pos.y as f64;
+                            }
+                        }
+                        // 忽略保存错误（例如磁盘问题），仅打印日志
+                        if let Err(e) = save_config(app.clone(), cfg) {
+                            eprintln!("save window state failed: {}", e);
+                        }
+                    }
+                }
+                _ => {}
+            }
         })
         .invoke_handler(tauri::generate_handler![
             greet,

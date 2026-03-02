@@ -29,10 +29,6 @@ const activeTab = ref<Tab>("config");
           剧本
         </button>
       </nav>
-      <div class="topbar-actions">
-        <span class="placeholder">运行</span>
-        <span class="placeholder">保存</span>
-      </div>
     </header>
     <main class="main">
       <ConfigView v-show="activeTab === 'config'" />
@@ -69,6 +65,7 @@ const activeTab = ref<Tab>("config");
 .topbar-tabs {
   display: flex;
   gap: 0.25rem;
+  margin: 0 auto;
 }
 
 .tab {
