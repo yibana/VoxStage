@@ -9,6 +9,11 @@ import ExprInput from "./ExprInput.vue";
 
 const items = ref<ScriptItem[]>([]);
 const roleNames = ref<string[]>([]);
+const speakParamsEditingIndex = ref<number | null>(null);
+const speakParamsDraft = ref<{ key: string; value: string }[]>([]);
+const roleProviderMap = ref<Record<string, string>>({});
+const currentSpeakRoleName = ref<string>("");
+const currentSpeakProvider = ref<string>("");
 
 /** 编辑 | Code 双模式 */
 const mode = ref<"edit" | "code">("edit");
@@ -49,13 +54,17 @@ const availableVars = computed(() => {
 
 /** 表达式编辑辅助：内置函数模板 */
 const builtinFunctions = [
+  { name: "now()", snippet: "now()", desc: "当前 Unix 时间戳（秒）" },
   { name: "time_hour()", snippet: "time_hour()", desc: "当前小时 (0-23)" },
-  { name: "rand_int(1, 10)", snippet: "rand_int(1, 10)", desc: "随机整数" },
+  { name: "time_minute()", snippet: "time_minute()", desc: "当前分钟 (0-59)" },
+  { name: "time_second()", snippet: "time_second()", desc: "当前秒钟 (0-59)" },
+  { name: "rand()", snippet: "rand()", desc: "随机整数 (0-999999999)" },
+  { name: "rand_int(1, 10)", snippet: "rand_int(1, 10)", desc: "给定区间内随机整数" },
   { name: "rand_bool()", snippet: "rand_bool()", desc: "随机布尔值" },
   {
     name: 'rand_choice("a", "b")',
     snippet: 'rand_choice("a", "b")',
-    desc: "从多个选项中随机选择",
+    desc: "从多个选项中随机选择一个",
   },
 ];
 
@@ -65,6 +74,28 @@ async function loadRoles() {
     roleNames.value = roles.map((r) => r.name);
   } catch (e) {
     console.error("load roles failed", e);
+  }
+}
+
+async function loadRoleProviderMap() {
+  try {
+    const cfg = await invoke<AppConfig>("get_config");
+    const modelProvider: Record<string, string> = {};
+    for (const m of cfg.models) {
+      if (m.name && m.provider) {
+        modelProvider[m.name] = m.provider;
+      }
+    }
+    const map: Record<string, string> = {};
+    for (const r of cfg.roles) {
+      const p = modelProvider[r.model];
+      if (p) {
+        map[r.name] = p;
+      }
+    }
+    roleProviderMap.value = map;
+  } catch (e) {
+    console.error("load role provider map failed", e);
   }
 }
 
@@ -141,7 +172,7 @@ function moveRangeEnd(index: number): number {
   return index;
 }
 
-/** 从 index 往前找上一个同层级兄弟的起始下标（含块则取块头） */
+/** 从 index 往前找上一个同缩进的兄弟起始下标（含块则取块头） */
 function prevSiblingStart(index: number): number {
   const arr = items.value;
   const cur = arr[index];
@@ -152,7 +183,7 @@ function prevSiblingStart(index: number): number {
   return -1;
 }
 
-/** 从 rangeEnd+1 往后找下一个同层级兄弟的起始下标（含块则取块头） */
+/** 从 rangeEnd+1 往后找下一个同缩进的兄弟起始下标（含块则取块头） */
 function nextSiblingStart(rangeEnd: number): number {
   const arr = items.value;
   if (rangeEnd + 1 >= arr.length) return -1;
@@ -167,6 +198,10 @@ function moveUp(index: number) {
   if (index <= 0) return;
   const prevStart = prevSiblingStart(index);
   if (prevStart < 0) return;
+  // 仅允许在同一父块（或同为顶层）内移动
+  const parentCur = getBlockParentIndex(index);
+  const parentPrev = getBlockParentIndex(prevStart);
+  if (parentCur !== parentPrev || arr[prevStart].indent !== arr[index].indent) return;
   const rangeEnd = moveRangeEnd(index);
   const prevEnd = blockTypes.includes(arr[prevStart].type) ? blockEndIndex(prevStart) : prevStart;
   const chunkMe = arr.splice(index, rangeEnd - index + 1);
@@ -181,6 +216,10 @@ function moveDown(index: number) {
   const rangeEnd = moveRangeEnd(index);
   const nextStart = nextSiblingStart(rangeEnd);
   if (nextStart < 0) return;
+  // 仅允许在同一父块（或同为顶层）内移动
+  const parentCur = getBlockParentIndex(index);
+  const parentNext = getBlockParentIndex(nextStart);
+  if (parentCur !== parentNext || arr[nextStart].indent !== arr[index].indent) return;
   const nextRow = arr[nextStart];
   const nextEnd = blockTypes.includes(nextRow.type) ? blockEndIndex(nextStart) : nextStart;
   const count = rangeEnd - index + 1;
@@ -277,12 +316,73 @@ function clearScript() {
   items.value = [];
 }
 
+function openSpeakParams(idx: number) {
+  const it = items.value[idx];
+  if (!it || it.type !== "speak") return;
+  const role = it.role ?? "";
+  currentSpeakRoleName.value = role;
+  currentSpeakProvider.value = role ? roleProviderMap.value[role] ?? "" : "";
+  const params = it.speakParams ?? {};
+  const entries = Object.entries(params).filter(
+    ([k]) => k && k.trim().length > 0,
+  );
+  // 至少保留一行空输入，方便直接键入
+  const list =
+    entries.length > 0
+      ? entries.map(([key, value]) => ({ key, value: String(value) }))
+      : [{ key: "", value: "" }];
+  speakParamsDraft.value = list;
+  speakParamsEditingIndex.value = idx;
+}
+
+function addSpeakParamRow() {
+  speakParamsDraft.value.push({ key: "", value: "" });
+}
+
+function removeSpeakParamRow(i: number) {
+  speakParamsDraft.value.splice(i, 1);
+  if (speakParamsDraft.value.length === 0) {
+    speakParamsDraft.value.push({ key: "", value: "" });
+  }
+}
+
+function ensureSpeakParamKey(key: string) {
+  const k = key.trim();
+  if (!k) return;
+  const exists = speakParamsDraft.value.some((row) => row.key === k);
+  if (!exists) {
+    speakParamsDraft.value.push({ key: k, value: "" });
+  }
+}
+
+function applySpeakParams() {
+  const idx = speakParamsEditingIndex.value;
+  if (idx == null) return;
+  const it = items.value[idx];
+  if (!it || it.type !== "speak") {
+    speakParamsEditingIndex.value = null;
+    return;
+  }
+  const obj: Record<string, string> = {};
+  for (const { key, value } of speakParamsDraft.value) {
+    const k = key.trim();
+    if (!k) continue;
+    obj[k] = String(value ?? "");
+  }
+  it.speakParams = obj;
+  speakParamsEditingIndex.value = null;
+}
+
+function cancelSpeakParams() {
+  speakParamsEditingIndex.value = null;
+}
+
 /** 运行剧本（编辑模式用 config+items 生成 .vox，Code 模式直接用 codeText） */
 const runError = ref<string | null>(null);
 const isRunning = ref(false);
 const isPaused = ref(false);
-/** 是否循环运行整个剧本 */
-const loopRun = ref(false);
+/** 是否循环运行整个剧本（默认开启） */
+const loopRun = ref(true);
 async function runScript() {
   runError.value = null;
   isRunning.value = true;
@@ -401,6 +501,7 @@ let unlistenFinished: (() => void) | null = null;
 onMounted(async () => {
   // 初始加载：角色列表 + 剧本草稿
   loadRoles();
+  loadRoleProviderMap();
   loadScriptDraft();
 
   try {
@@ -432,6 +533,7 @@ onMounted(async () => {
     await listen("config-changed", () => {
       console.log("config-changed event, reload roles");
       loadRoles();
+      loadRoleProviderMap();
     });
   } catch (e) {
     console.error(
@@ -564,6 +666,21 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
               <option value="">选择角色</option>
               <option v-for="r in roleNames" :key="r" :value="r">{{ r }}</option>
             </select>
+            <button
+              type="button"
+              class="btn-speak-params"
+              @click="openSpeakParams(idx)"
+            >
+              参数
+              <span
+                v-if="
+                  item.speakParams &&
+                  Object.keys(item.speakParams).length
+                "
+              >
+                *
+              </span>
+            </button>
             <input
               v-model="item.text"
               class="input text-input"
@@ -760,6 +877,150 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
       </div>
     </div>
 
+    <!-- speak 行参数覆写弹窗 -->
+    <div
+      v-if="speakParamsEditingIndex !== null"
+      class="dialog-backdrop"
+    >
+      <div class="dialog">
+        <h3 class="dialog-title">本句角色参数覆写</h3>
+        <p class="dialog-desc">
+          仅影响当前 speak 行；留空的字段会继续使用角色默认参数。
+        </p>
+        <p v-if="currentSpeakRoleName" class="dialog-provider">
+          角色：{{ currentSpeakRoleName }}
+          <span v-if="currentSpeakProvider">
+            （provider: {{ currentSpeakProvider }}）
+          </span>
+        </p>
+
+        <div
+          v-if="currentSpeakProvider === 'gpt_sovits_v2'"
+          class="preset-params-row"
+        >
+          <span class="preset-label">GPT-SoVITS 常用字段：</span>
+          <button
+            type="button"
+            class="preset-chip"
+            @click="ensureSpeakParamKey('language')"
+          >
+            language
+          </button>
+          <button
+            type="button"
+            class="preset-chip"
+            @click="ensureSpeakParamKey('text_lang')"
+          >
+            text_lang
+          </button>
+          <button
+            type="button"
+            class="preset-chip"
+            @click="ensureSpeakParamKey('ref_audio_path')"
+          >
+            ref_audio_path
+          </button>
+          <button
+            type="button"
+            class="preset-chip"
+            @click="ensureSpeakParamKey('prompt_text')"
+          >
+            prompt_text
+          </button>
+          <button
+            type="button"
+            class="preset-chip"
+            @click="ensureSpeakParamKey('speaker_id')"
+          >
+            speaker_id
+          </button>
+        </div>
+
+        <div
+          v-else-if="currentSpeakProvider === 'bert_vits2'"
+          class="preset-params-row"
+        >
+          <span class="preset-label">Bert-VITS2 常用字段：</span>
+          <button
+            type="button"
+            class="preset-chip"
+            @click="ensureSpeakParamKey('language')"
+          >
+            language
+          </button>
+          <button
+            type="button"
+            class="preset-chip"
+            @click="ensureSpeakParamKey('speaker_id')"
+          >
+            speaker_id
+          </button>
+          <button
+            type="button"
+            class="preset-chip"
+            @click="ensureSpeakParamKey('emotion')"
+          >
+            emotion
+          </button>
+          <button
+            type="button"
+            class="preset-chip"
+            @click="ensureSpeakParamKey('length')"
+          >
+            length
+          </button>
+        </div>
+        <div class="kv-list">
+          <div
+            v-for="(row, i) in speakParamsDraft"
+            :key="i"
+            class="kv-row"
+          >
+            <input
+              v-model="row.key"
+              class="kv-key"
+              placeholder="参数名，如 language"
+            />
+            <input
+              v-model="row.value"
+              class="kv-value"
+              placeholder='值，如 "zh" / "1.0"'
+            />
+            <button
+              type="button"
+              class="btn-del-small"
+              @click="removeSpeakParamRow(i)"
+            >
+              删
+            </button>
+          </div>
+        </div>
+        <button
+          type="button"
+          class="btn-add-small"
+          @click="addSpeakParamRow"
+        >
+          + 添加参数
+        </button>
+        <div class="dialog-actions">
+          <button
+            type="button"
+            class="btn-primary"
+            @click="applySpeakParams"
+          >
+            确定
+          </button>
+          <button
+            type="button"
+            class="btn-secondary"
+            @click="cancelSpeakParams"
+          >
+            取消
+          </button>
+        </div>
+      </div>
+    </div>
+
   </div>
 </template>
 
@@ -927,6 +1188,161 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
 .run-loop-toggle input[type="checkbox"] {
   width: 14px;
   height: 14px;
+}
+
+.btn-speak-params {
+  margin-left: 0.25rem;
+  padding: 0.1rem 0.4rem;
+  font-size: 0.7rem;
+  border-radius: 999px;
+  border: 1px solid #d4d4d8;
+  background: #f9fafb;
+  cursor: pointer;
+}
+
+.btn-speak-params span {
+  color: #f97316;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.dialog {
+  background: #ffffff;
+  padding: 1rem 1.25rem;
+  border-radius: 0.5rem;
+  max-width: 520px;
+  width: 100%;
+  box-shadow: 0 20px 40px rgba(15, 23, 42, 0.25);
+}
+
+.dialog-title {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+}
+
+.dialog-desc {
+  margin: 0 0 0.75rem;
+  font-size: 0.8rem;
+  color: #6b7280;
+}
+
+.dialog-provider {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  color: #374151;
+}
+
+.preset-params-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem;
+  margin: 0 0 0.75rem;
+  font-size: 0.75rem;
+}
+
+.preset-label {
+  color: #6b7280;
+}
+
+.preset-chip {
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid #d1d5db;
+  background: #f9fafb;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.preset-chip:hover {
+  background: #e5e7eb;
+}
+
+.kv-list {
+  margin: 0 0 0.5rem;
+}
+
+.kv-row {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+
+.kv-key,
+.kv-value {
+  flex: 1;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.8rem;
+  border-radius: 0.25rem;
+  border: 1px solid #d4d4d8;
+}
+
+.btn-add-small {
+  margin-top: 0.25rem;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.75rem;
+  border-radius: 999px;
+  border: 1px solid #d1d5db;
+  background: #f3f4f6;
+  cursor: pointer;
+}
+
+.btn-add-small:hover {
+  background: #e5e7eb;
+}
+
+.btn-del-small {
+  padding: 0.15rem 0.4rem;
+  font-size: 0.7rem;
+  border-radius: 999px;
+  border: 1px solid #fecaca;
+  background: #fee2e2;
+  color: #b91c1c;
+  cursor: pointer;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.btn-primary {
+  padding: 0.25rem 0.8rem;
+  font-size: 0.8rem;
+  border-radius: 0.375rem;
+  border: none;
+  background: #1d4ed8;
+  color: #ffffff;
+  cursor: pointer;
+}
+
+.btn-primary:hover {
+  background: #1e40af;
+}
+
+.btn-secondary {
+  padding: 0.25rem 0.8rem;
+  font-size: 0.8rem;
+  border-radius: 0.375rem;
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: #374151;
+  cursor: pointer;
+}
+
+.btn-secondary:hover {
+  background: #f3f4f6;
 }
 
 .script-row-active {

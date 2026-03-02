@@ -27,6 +27,8 @@ export interface ScriptItem {
   role?: string;
   /** speak: 文本 */
   text?: string;
+  /** speak: 本句覆写的角色参数（key/value），仅当前 speak 生效 */
+  speakParams?: Record<string, string>;
 
   /** sleep: 毫秒 */
   ms?: number;
@@ -57,7 +59,7 @@ export function createItem(type: ScriptItemType, indent = 0): ScriptItem {
   const id = `item-${nextId++}`;
   switch (type) {
     case "speak":
-      return { id, type, indent, role: "", text: "" };
+      return { id, type, indent, role: "", text: "", speakParams: {} };
     case "sleep":
       return { id, type, indent, ms: 1000 };
     case "if":
@@ -153,7 +155,19 @@ export function toVox(config: AppConfig, items: ScriptItem[]): string {
         const role = it.role ?? "";
         const text = escapeString(it.text ?? "");
         if (!role && !text) break;
-        lines.push(`${pad(d)}speak ${role} "${text}"`);
+        const params = it.speakParams ?? {};
+        const paramEntries = Object.entries(params).filter(
+          ([k, v]) => k && v != null && String(v).length > 0,
+        );
+        let paramPart = "";
+        if (paramEntries.length > 0) {
+          const sorted = paramEntries.sort(([a], [b]) => a.localeCompare(b));
+          const inner = sorted
+            .map(([k, v]) => `${k} = "${escapeString(String(v))}"`)
+            .join(", ");
+          paramPart = `(${inner})`;
+        }
+        lines.push(`${pad(d)}speak ${role}${paramPart} "${text}"`);
         break;
       }
       case "sleep": {

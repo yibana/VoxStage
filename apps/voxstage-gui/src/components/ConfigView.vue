@@ -177,6 +177,16 @@ onMounted(() => {
             <label>model_id</label>
             <input v-model="m.model_id" placeholder="可选" />
           </div>
+          <div class="item-row">
+            <label>音频缓存</label>
+            <label class="checkbox-inline">
+              <input
+                type="checkbox"
+                v-model="m.enable_cache"
+              />
+              <span>启用（相同文本与参数重复请求时复用缓存音频）</span>
+            </label>
+          </div>
           <button type="button" class="btn-del" @click="removeModel(i)">删除</button>
         </div>
       </div>

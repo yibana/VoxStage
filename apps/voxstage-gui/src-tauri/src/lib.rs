@@ -27,6 +27,9 @@ pub struct ModelEntry {
     pub model_id: String,
     #[serde(default)]
     pub extra: std::collections::HashMap<String, String>,
+    /// 是否为该模型启用音频缓存（相同文本/参数复用合成结果）
+    #[serde(default)]
+    pub enable_cache: bool,
 }
 
 /// 单条角色配置（对应 DSL 的 role 块）
@@ -85,6 +88,9 @@ pub struct ScriptItemDto {
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// speak: 本句覆写参数
+    #[serde(skip_serializing_if = "Option::is_none", rename = "speakParams")]
+    pub speak_params: Option<std::collections::HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -183,6 +189,7 @@ fn items_to_dtos(
                     source_index: None,
                     role: None,
                     text: None,
+                    speak_params: None,
                     ms: None,
                     condition: None,
                     times: None,
@@ -201,6 +208,7 @@ fn items_to_dtos(
                     source_index: None,
                     role: None,
                     text: None,
+                    speak_params: None,
                     ms: None,
                     condition: None,
                     times: None,
@@ -221,6 +229,11 @@ fn items_to_dtos(
                     source_index: Some(idx),
                     role: Some(stmt.target.clone()),
                     text: Some(stmt.text.clone()),
+                    speak_params: if stmt.params.is_empty() {
+                        None
+                    } else {
+                        Some(stmt.params.clone())
+                    },
                     ms: None,
                     condition: None,
                     times: None,
@@ -241,6 +254,7 @@ fn items_to_dtos(
                     source_index: Some(idx),
                     role: None,
                     text: None,
+                    speak_params: None,
                     ms: Some(stmt.duration_ms),
                     condition: None,
                     times: None,
@@ -259,6 +273,7 @@ fn items_to_dtos(
                     source_index: None,
                     role: None,
                     text: None,
+                    speak_params: None,
                     ms: None,
                     condition: Some(expr_to_string(&stmt.condition)),
                     times: None,
@@ -283,6 +298,7 @@ fn items_to_dtos(
                     source_index: None,
                     role: None,
                     text: None,
+                    speak_params: None,
                     ms: None,
                     condition: None,
                     times: Some(expr_to_string(&stmt.times)),
@@ -307,6 +323,7 @@ fn items_to_dtos(
                     source_index: None,
                     role: None,
                     text: None,
+                    speak_params: None,
                     ms: None,
                     condition: Some(expr_to_string(&stmt.condition)),
                     times: None,
@@ -331,6 +348,7 @@ fn items_to_dtos(
                     source_index: None,
                     role: None,
                     text: None,
+                    speak_params: None,
                     ms: None,
                     condition: None,
                     times: None,
@@ -349,6 +367,7 @@ fn items_to_dtos(
                     source_index: None,
                     role: None,
                     text: None,
+                    speak_params: None,
                     ms: None,
                     condition: None,
                     times: None,
@@ -367,6 +386,7 @@ fn items_to_dtos(
                     source_index: None,
                     role: None,
                     text: None,
+                    speak_params: None,
                     ms: None,
                     condition: None,
                     times: None,
@@ -385,6 +405,7 @@ fn items_to_dtos(
                     source_index: None,
                     role: None,
                     text: None,
+                    speak_params: None,
                     ms: None,
                     condition: None,
                     times: None,
@@ -403,6 +424,7 @@ fn items_to_dtos(
                     source_index: None,
                     role: None,
                     text: None,
+                    speak_params: None,
                     ms: None,
                     condition: None,
                     times: None,
@@ -549,8 +571,11 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
-/// 根据脚本中的 model 块创建 TTS Provider（与 CLI 逻辑一致）
-fn model_def_to_provider(def: &ModelDef) -> Result<Arc<dyn vox_core::TtsProvider>, String> {
+/// 根据脚本中的 model 块创建 TTS Provider（与 CLI 逻辑一致），并结合 GUI 配置决定是否启用缓存。
+fn model_def_to_provider(
+    def: &ModelDef,
+    app_cfg: &AppConfig,
+) -> Result<Arc<dyn vox_core::TtsProvider>, String> {
     let typ = def.fields.get("type").map(String::as_str).unwrap_or("http");
     if typ != "http" {
         return Err(format!("不支持的 model type: {}", typ));
@@ -571,25 +596,41 @@ fn model_def_to_provider(def: &ModelDef) -> Result<Arc<dyn vox_core::TtsProvider
         .map(String::as_str)
         .unwrap_or("bert_vits2");
 
-    match provider {
+    let base_provider: Arc<dyn vox_core::TtsProvider> = match provider {
         "bert_vits2" => {
             let config = BertVits2Config {
                 endpoint,
                 model_id,
             };
-            Ok(BertVits2Provider::new(def.name.clone(), config).into_shared())
+            BertVits2Provider::new(def.name.clone(), config).into_shared()
         }
         "gpt_sovits_v2" => {
             let config = GptSovitsV2Config {
                 endpoint,
                 model_id,
             };
-            Ok(GptSovitsV2Provider::new(def.name.clone(), config).into_shared())
+            GptSovitsV2Provider::new(def.name.clone(), config).into_shared()
         }
-        _ => Err(format!(
-            "不支持的 provider: {}（可选: bert_vits2, gpt_sovits_v2）",
-            provider
-        )),
+        _ => {
+            return Err(format!(
+                "不支持的 provider: {}（可选: bert_vits2, gpt_sovits_v2）",
+                provider
+            ))
+        }
+    };
+
+    // 根据 GUI 配置中对应模型的 enable_cache 字段决定是否启用缓存。
+    let enable_cache = app_cfg
+        .models
+        .iter()
+        .find(|m| m.name == def.name)
+        .map(|m| m.enable_cache)
+        .unwrap_or(false);
+
+    if enable_cache {
+        Ok(vox_core::CachedTtsProvider::new(base_provider))
+    } else {
+        Ok(base_provider)
     }
 }
 
@@ -615,10 +656,13 @@ async fn run_script(
 
     // 关键：把阻塞式播放逻辑放到后台线程，避免卡住 WebView/UI。
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        // 读取 GUI 配置，用于决定每个模型是否启用音频缓存。
+        let app_cfg = get_config(app_handle.clone())?;
+
         // 由于 ModelManager 构建一次即可复用，这里提前构建，循环中重复调用 runner。
         let mut manager = ModelManager::new();
         register_providers_from_script(&mut manager, &vox_text, |def: &ModelDef| {
-            model_def_to_provider(def)
+            model_def_to_provider(def, &app_cfg)
         })
         .map_err(|e: EngineError| e.to_string())?;
 

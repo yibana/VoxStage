@@ -3,6 +3,7 @@
 
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// 描述单个 TTS 模型在参数上的能力。
 /// 执行引擎会根据这些能力信息裁剪不被支持的参数，避免向后端发送无效字段。
@@ -80,4 +81,191 @@ pub trait TtsProvider: Send + Sync {
         req: SynthesisRequest,
     ) -> Result<AudioStream, TtsError>;
 }
+
+/// 一个简单的基于内存的 TTS 结果缓存包装器。
+/// 用于在同一进程生命周期内，对相同的合成请求复用音频字节，避免重复 HTTP 调用或本地推理。
+#[derive(Clone)]
+struct CacheKey {
+    text: String,
+    role: Option<String>,
+    speed: Option<f32>,
+    volume: Option<f32>,
+    pitch: Option<f32>,
+    emotion: Option<String>,
+    /// extra 中的键值对，按 key/value 排序后存入，保证哈希稳定。
+    extra: Vec<(String, String)>,
+}
+
+impl CacheKey {
+    fn from_request(req: &SynthesisRequest) -> Self {
+        let mut extra: Vec<(String, String)> = req
+            .extra
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        extra.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+        Self {
+            text: req.text.clone(),
+            role: req.role.clone(),
+            speed: req.speed,
+            volume: req.volume,
+            pitch: req.pitch,
+            emotion: req.emotion.clone(),
+            extra,
+        }
+    }
+}
+
+impl std::hash::Hash for CacheKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.text.hash(state);
+        self.role.hash(state);
+        // 对于可选的浮点字段，使用 to_bits 后再哈希，并区分 None / Some。
+        self.speed
+            .map(|v| v.to_bits())
+            .unwrap_or(0)
+            .hash(state);
+        self.volume
+            .map(|v| v.to_bits())
+            .unwrap_or(0)
+            .hash(state);
+        self.pitch
+            .map(|v| v.to_bits())
+            .unwrap_or(0)
+            .hash(state);
+        self.emotion.hash(state);
+        self.extra.hash(state);
+    }
+}
+
+impl PartialEq for CacheKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+            && self.role == other.role
+            && self
+                .speed
+                .map(|v| v.to_bits())
+                .unwrap_or(0)
+                == other.speed.map(|v| v.to_bits()).unwrap_or(0)
+            && self
+                .volume
+                .map(|v| v.to_bits())
+                .unwrap_or(0)
+                == other.volume.map(|v| v.to_bits()).unwrap_or(0)
+            && self
+                .pitch
+                .map(|v| v.to_bits())
+                .unwrap_or(0)
+                == other.pitch.map(|v| v.to_bits()).unwrap_or(0)
+            && self.emotion == other.emotion
+            && self.extra == other.extra
+    }
+}
+
+impl Eq for CacheKey {}
+
+/// 通用的缓存包装器，向外仍然暴露为 `Arc<dyn TtsProvider>`。
+/// 内部使用一个简单的基于计数器的 LRU：每次命中会刷新“最近使用”时间，
+/// 当缓存条目数超过上限时，淘汰最久未被访问的条目。
+pub struct CachedTtsProvider {
+    inner: Arc<dyn TtsProvider>,
+    cache: Mutex<CacheInner>,
+}
+
+struct CacheInner {
+    /// key -> (audio_bytes, last_used_counter)
+    map: HashMap<CacheKey, (Vec<u8>, u64)>,
+    next_counter: u64,
+}
+
+/// 单个 Provider 的最大缓存条目数。
+/// 这是一个安全上限，用于防止缓存无限增长；可根据需要调整。
+const MAX_CACHE_ENTRIES: usize = 256;
+
+impl CachedTtsProvider {
+    /// 用一个已存在的 Provider 创建带缓存的 Provider。
+    /// 返回值直接是 `Arc<dyn TtsProvider>`，方便在现有代码中无缝替换。
+    pub fn new(inner: Arc<dyn TtsProvider>) -> Arc<dyn TtsProvider> {
+        Arc::new(Self {
+            inner,
+            cache: Mutex::new(CacheInner {
+                map: HashMap::new(),
+                next_counter: 0,
+            }),
+        })
+    }
+}
+
+#[async_trait]
+impl TtsProvider for CachedTtsProvider {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn capabilities(&self) -> &ModelCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn synthesize(
+        &self,
+        req: SynthesisRequest,
+    ) -> Result<AudioStream, TtsError> {
+        let key = CacheKey::from_request(&req);
+
+        // 1. 先尝试从缓存命中（只缓存 Full 模式的字节流）。
+        // 命中时更新最近使用计数，符合 LRU 语义。
+        {
+            let mut cache = self
+                .cache
+                .lock()
+                .expect("CachedTtsProvider cache mutex poisoned");
+            // 先生成新的时间戳，再尝试命中并刷新 last_used。
+            let ts = cache.next_counter;
+            cache.next_counter = cache.next_counter.wrapping_add(1);
+            if let Some((bytes, last_used)) = cache.map.get_mut(&key) {
+                *last_used = ts;
+                return Ok(AudioStream::Full(bytes.clone()));
+            }
+        }
+
+        // 2. 未命中则调用底层 Provider（不持有锁，避免长时间阻塞）。
+        let result = self.inner.synthesize(req).await?;
+
+        // 3. 仅当返回的是完整字节流时才写入缓存。
+        if let AudioStream::Full(data) = &result {
+            let mut cache = self
+                .cache
+                .lock()
+                .expect("CachedTtsProvider cache mutex poisoned");
+
+            // 如果已达到容量上限，先淘汰最久未使用的条目。
+            if cache.map.len() >= MAX_CACHE_ENTRIES {
+                // 找到 last_used 最小的条目并淘汰
+                let evict_key_opt = {
+                    let mut oldest: Option<(CacheKey, u64)> = None;
+                    for (k, (_, ts)) in cache.map.iter() {
+                        match oldest {
+                            Some((_, old_ts)) if *ts >= old_ts => {}
+                            _ => {
+                                oldest = Some((k.clone(), *ts));
+                            }
+                        }
+                    }
+                    oldest.map(|(k, _)| k)
+                };
+                if let Some(evict_key) = evict_key_opt {
+                    cache.map.remove(&evict_key);
+                }
+            }
+
+            let ts = cache.next_counter;
+            cache.next_counter = cache.next_counter.wrapping_add(1);
+            cache.map.insert(key, (data.clone(), ts));
+        }
+
+        Ok(result)
+    }
+}
+
 

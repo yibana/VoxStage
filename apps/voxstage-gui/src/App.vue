@@ -2,8 +2,9 @@
 import { ref } from "vue";
 import ConfigView from "./components/ConfigView.vue";
 import ScriptView from "./components/ScriptView.vue";
+import HelpView from "./components/HelpView.vue";
 
-type Tab = "config" | "script";
+type Tab = "config" | "script" | "help";
 const activeTab = ref<Tab>("config");
 </script>
 
@@ -28,11 +29,20 @@ const activeTab = ref<Tab>("config");
         >
           剧本
         </button>
+        <button
+          type="button"
+          class="tab"
+          :class="{ active: activeTab === 'help' }"
+          @click="activeTab = 'help'"
+        >
+          帮助
+        </button>
       </nav>
     </header>
     <main class="main">
       <ConfigView v-show="activeTab === 'config'" />
       <ScriptView v-show="activeTab === 'script'" />
+      <HelpView v-show="activeTab === 'help'" />
     </main>
   </div>
 </template>

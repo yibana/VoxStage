@@ -7,6 +7,8 @@ export interface ModelEntry {
   endpoint: string;
   model_id: string;
   extra: Record<string, string>;
+  /** 是否启用该模型的音频缓存（相同文本/参数复用合成结果） */
+  enable_cache: boolean;
 }
 
 export interface RoleEntry {
@@ -28,6 +30,7 @@ export function emptyModel(): ModelEntry {
     endpoint: "",
     model_id: "",
     extra: {},
+    enable_cache: false,
   };
 }
 

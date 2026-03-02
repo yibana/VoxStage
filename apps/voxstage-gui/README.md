@@ -7,6 +7,7 @@ VoxStage GUI 是 VoxStage 项目的桌面前端，基于 **Tauri 2 + Vue 3 + Typ
 - 一键调用 `vox-engine` / `vox-runner` 在本地播放 TTS 与 BGM；
 - 在运行时高亮当前执行步骤，并提供暂停 / 继续 / 中断控制与「循环运行」模式；
 - 记住窗口大小 / 位置与最大化状态，下次启动时恢复到上次使用状态。
+ - 为每条 `speak` 语句提供 per-speak 角色参数覆写（如 language / text_lang / ref_audio_path 等），并通过表达式输入组件提供变量/函数自动补全与语法提示。
 
 ---
 
@@ -17,7 +18,9 @@ GUI 分为 **前端 Vue 应用** 与 **Tauri Rust 后端** 两层：
 - 前端：`apps/voxstage-gui/src`
   - `App.vue`：顶层布局与 Tab 切换（「配置」/「剧本」）。
   - `components/ConfigView.vue`：模型与角色配置界面。
-  - `components/ScriptView.vue`：剧本编辑与运行界面（编辑 / Code 双模式、BGM、表达式辅助、进度高亮等）。
+  - `components/ScriptView.vue`：剧本编辑与运行界面（编辑 / Code 双模式、BGM、表达式辅助、执行进度高亮、循环运行、speak 参数覆写等）。
+  - `components/ExprInput.vue`：表达式输入组件，提供变量/内置函数插入、语法校验与自动补全。
+  - `components/HelpView.vue`：内置帮助页，概述软件用法与 .vox 语法速查。
   - `types/config.ts`：前端配置类型定义，与 Tauri 端 `AppConfig` 对应。
   - `types/script.ts`：前端剧本步骤类型定义（`ScriptItem`），以及 `toVox(config, items)`，负责将列表式剧本导出为 `.vox` 文本。
 
