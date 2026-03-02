@@ -1053,7 +1053,7 @@ fn parse_prefix(
             Ok(lit)
         }
         Token::Str(s) => {
-            let lit = Expr::Literal(s.clone());
+            let lit = Expr::StrLiteral(s.clone());
             *pos += 1;
             Ok(lit)
         }

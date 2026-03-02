@@ -128,8 +128,8 @@ let user_name = "小明"
         Item::Let(stmt) => {
             assert_eq!(stmt.name, "user_name");
             match &stmt.expr {
-                Expr::Literal(v) => assert_eq!(v, "小明"),
-                other => panic!("let 表达式应为 Literal，小明，实际为: {:?}", other),
+                Expr::StrLiteral(v) => assert_eq!(v, "小明"),
+                other => panic!("let 表达式应为 StrLiteral(小明)，实际为: {:?}", other),
             }
         }
         other => panic!("首个语句应为 LetStmt，实际为: {:?}", other),
@@ -150,8 +150,8 @@ set user_name = "小红"
         Item::Set(stmt) => {
             assert_eq!(stmt.name, "user_name");
             match &stmt.expr {
-                Expr::Literal(v) => assert_eq!(v, "小红"),
-                other => panic!("set 表达式应为 Literal，小红，实际为: {:?}", other),
+                Expr::StrLiteral(v) => assert_eq!(v, "小红"),
+                other => panic!("set 表达式应为 StrLiteral(小红)，实际为: {:?}", other),
             }
         }
         other => panic!("首个语句应为 SetStmt，实际为: {:?}", other),
@@ -189,7 +189,7 @@ while keep_running {
                 Expr::Binary { op, left, right } => {
                     assert_eq!(*op, BinaryOp::Eq);
                     match (&**left, &**right) {
-                        (Expr::Var(name), Expr::Literal(val)) => {
+                        (Expr::Var(name), Expr::StrLiteral(val)) => {
                             assert_eq!(name, "lang");
                             assert_eq!(val, "ZH");
                         }

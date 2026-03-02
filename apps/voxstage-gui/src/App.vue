@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import ConfigView from "./components/ConfigView.vue";
+import ScriptView from "./components/ScriptView.vue";
 
 type Tab = "config" | "script";
 const activeTab = ref<Tab>("config");
@@ -35,9 +36,7 @@ const activeTab = ref<Tab>("config");
     </header>
     <main class="main">
       <ConfigView v-show="activeTab === 'config'" />
-      <div v-show="activeTab === 'script'" class="script-placeholder">
-        <p>剧本编排（Phase 3 实现）</p>
-      </div>
+      <ScriptView v-show="activeTab === 'script'" />
     </main>
   </div>
 </template>
@@ -104,9 +103,17 @@ const activeTab = ref<Tab>("config");
 
 .main {
   flex: 1;
+  min-height: 0;
   padding: 1.5rem;
   background: #f6f6f6;
   overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.main > * {
+  flex: 1;
+  min-height: 0;
 }
 
 .script-placeholder {

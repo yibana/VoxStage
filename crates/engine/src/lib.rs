@@ -547,6 +547,7 @@ fn parse_literal(s: &str) -> Value {
 fn eval_expr(expr: &Expr, vars: &HashMap<String, String>) -> Value {
     match expr {
         Expr::Literal(s) => parse_literal(s),
+        Expr::StrLiteral(s) => Value::Str(s.clone()),
         Expr::Var(name) => {
             if let Some(v) = vars.get(name) {
                 parse_literal(v)

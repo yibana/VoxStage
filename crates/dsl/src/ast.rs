@@ -48,8 +48,10 @@ pub enum Item {
 /// 表达式节点。
 #[derive(Debug, Clone)]
 pub enum Expr {
-    /// 字面量，例如数字、字符串、布尔等（具体类型由执行层解释）。
+    /// 字面量：数字或布尔（由执行层解释），序列化回 .vox 时不加引号。
     Literal(String),
+    /// 字符串字面量（源码中带双引号），序列化回 .vox 时需保留引号。
+    StrLiteral(String),
     /// 变量引用，例如 `foo`。
     Var(String),
     /// 一元运算，例如 `!flag` 或 `-x`。
