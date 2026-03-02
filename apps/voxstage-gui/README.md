@@ -6,8 +6,9 @@ VoxStage GUI 是 VoxStage 项目的桌面前端，基于 **Tauri 2 + Vue 3 + Typ
 - 以列表形式编辑 `.vox` 剧本（支持缩进块结构与 BGM 步骤）；
 - 一键调用 `vox-engine` / `vox-runner` 在本地播放 TTS 与 BGM；
 - 在运行时高亮当前执行步骤，并提供暂停 / 继续 / 中断控制与「循环运行」模式；
-- 记住窗口大小 / 位置与最大化状态，下次启动时恢复到上次使用状态。
- - 为每条 `speak` 语句提供 per-speak 角色参数覆写（如 language / text_lang / ref_audio_path 等），并通过表达式输入组件提供变量/函数自动补全与语法提示。
+- 记住窗口大小 / 位置与最大化状态，下次启动时恢复到上次使用状态；
+- 为每条 `speak` 语句提供 per-speak 角色参数覆写（如 language / text_lang / ref_audio_path 等），并通过表达式输入组件提供变量/函数自动补全与语法提示；
+- 按模型可选启用 TTS 音频缓存，对重复台词在单次会话内复用合成结果，并通过 LRU 机制限制缓存大小。
 
 ---
 

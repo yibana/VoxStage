@@ -171,6 +171,16 @@
   - 对应生成的 DSL 语法形如：`speak RoleName(key1 = "v1", key2 = "v2") "文本"`；
   - 从 `.vox` 解析回来的 `speak` 语句会将参数映射回前端的 `speakParams`，在弹窗中可视化编辑。
 
+### 5. TTS 音频缓存（可选）
+
+- 在 CLI 与 GUI 共用的核心层（`vox-core`）中新增 `CachedTtsProvider` 包装器：
+  - 对同一 Provider，在单个进程生命周期内为「相同请求」（文本 + 速度/音量/音高 + 情绪 + extra 参数）复用合成结果；
+  - 内部使用内存 LRU 缓存，默认上限为每个 Provider 256 条记录，超过时淘汰最久未使用的条目，避免内存无限增长。
+- 在 GUI 侧（`AppConfig.models`）：
+  - 为每个模型增加 `enable_cache: bool` 字段，对应「配置」页中模型卡片上的「音频缓存」复选框；
+  - 仅当勾选「音频缓存」时，Tauri 端会用 `CachedTtsProvider` 包装该模型的 Provider，并启用缓存；
+  - 默认关闭缓存，适合大量随机文本/高变内容的场景；对于重复度高的台词（提示音等），开启缓存可以显著减少重复 HTTP 请求或本地推理时间。
+
 ---
 
 ## 使用说明（更新版）
