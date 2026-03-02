@@ -335,8 +335,24 @@ fn parse_bgm_play(line_idx: usize, line: &str) -> Result<BgmPlayStmt, ParseError
             while let Some(ch) = chars.next() {
                 if ch == quote {
                     break;
+                } else if ch == '\\' {
+                    // 与 speak 文本保持一致的转义处理。
+                    if let Some(next) = chars.next() {
+                        match next {
+                            '\\' | '"' => path_or_url.push(next),
+                            'n' => path_or_url.push('\n'),
+                            't' => path_or_url.push('\t'),
+                            other => {
+                                path_or_url.push('\\');
+                                path_or_url.push(other);
+                            }
+                        }
+                    } else {
+                        path_or_url.push('\\');
+                    }
+                } else {
+                    path_or_url.push(ch);
                 }
-                path_or_url.push(ch);
             }
         }
     }
@@ -769,6 +785,21 @@ fn parse_speak(line_idx: usize, line: &str) -> Result<SpeakStmt, ParseError> {
         if ch == '"' {
             closed = true;
             break;
+        } else if ch == '\\' {
+            // 处理常见转义：\\、\"、\n、\t；其它保持原样（保留反斜杠）。
+            if let Some(next) = chars.next() {
+                match next {
+                    '\\' | '"' => text.push(next),
+                    'n' => text.push('\n'),
+                    't' => text.push('\t'),
+                    other => {
+                        text.push('\\');
+                        text.push(other);
+                    }
+                }
+            } else {
+                text.push('\\');
+            }
         } else {
             text.push(ch);
         }

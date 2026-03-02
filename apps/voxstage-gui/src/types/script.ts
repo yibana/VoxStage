@@ -7,13 +7,21 @@ export type ScriptItemType =
   | "for"
   | "while"
   | "let"
-  | "set";
+  | "set"
+  | "bgm_play"
+  | "bgm_volume"
+  | "bgm_pause"
+  | "bgm_resume"
+  | "bgm_stop";
 
 export interface ScriptItem {
   id: string;
   type: ScriptItemType;
   /** 缩进层级，用于列表显示（0 为顶层）。 */
   indent: number;
+
+  /** 静态语句索引（与 EngineCommand source_index 对齐），用于运行进度高亮。 */
+  sourceIndex?: number;
 
   /** speak: 角色名（来自全局角色配置） */
   role?: string;
@@ -33,6 +41,14 @@ export interface ScriptItem {
   varName?: string;
   /** let / set: 表达式字符串 */
   expr?: string;
+
+  /** bgm_play: 路径或 URL */
+  bgmPath?: string;
+  /** bgm_play: 是否循环 */
+  bgmLoop?: boolean;
+
+  /** bgm_volume: 音量（0.0 - 1.0） */
+  bgmVolume?: number;
 }
 
 let nextId = 1;
@@ -54,6 +70,14 @@ export function createItem(type: ScriptItemType, indent = 0): ScriptItem {
       return { id, type, indent, varName: "", expr: "" };
     case "set":
       return { id, type, indent, varName: "", expr: "" };
+    case "bgm_play":
+      return { id, type, indent, bgmPath: "", bgmLoop: true };
+    case "bgm_volume":
+      return { id, type, indent, bgmVolume: 0.5 };
+    case "bgm_pause":
+    case "bgm_resume":
+    case "bgm_stop":
+      return { id, type, indent };
   }
 }
 
@@ -153,6 +177,32 @@ export function toVox(config: AppConfig, items: ScriptItem[]): string {
         const cond = it.condition ?? "";
         lines.push(`${pad(d)}while ${cond} {`);
         currentDepth = d + 1;
+        break;
+      }
+      case "bgm_play": {
+        const path = it.bgmPath ?? "";
+        if (!path) break;
+        const escaped = escapeString(path);
+        const loop = it.bgmLoop ?? true;
+        const loopSuffix = loop ? " loop" : "";
+        lines.push(`${pad(d)}bgm "${escaped}"${loopSuffix}`);
+        break;
+      }
+      case "bgm_volume": {
+        const vol = it.bgmVolume ?? 1.0;
+        lines.push(`${pad(d)}bgm_volume ${vol}`);
+        break;
+      }
+      case "bgm_pause": {
+        lines.push(`${pad(d)}bgm_pause`);
+        break;
+      }
+      case "bgm_resume": {
+        lines.push(`${pad(d)}bgm_resume`);
+        break;
+      }
+      case "bgm_stop": {
+        lines.push(`${pad(d)}bgm_stop`);
         break;
       }
     }

@@ -5291,7 +5291,12 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
+ "tokio",
+ "vox-core",
  "vox-dsl",
+ "vox-engine",
+ "vox-runner",
+ "vox-tts-http",
 ]
 
 [[package]]

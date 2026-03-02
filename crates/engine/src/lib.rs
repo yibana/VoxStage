@@ -79,11 +79,15 @@ struct RoleRuntimeConfig {
     params: HashMap<String, String>,
 }
 
-/// 执行时上下文：包含脚本本身、角色配置与变量表。
+/// 执行时上下文：包含脚本本身、角色配置、变量表与语句索引映射。
 struct ExecContext {
     script: Script,
     roles: HashMap<String, RoleRuntimeConfig>,
     vars: HashMap<String, String>,
+    /// 静态语句索引表：将 AST 中的特定语句映射到 source_index（从 0 开始）。
+    /// - 仅对会产生 EngineCommand 的语句（speak/sleep）赋值；
+    /// - 同一条语句在循环中多次执行时复用同一个索引。
+    source_index_map: HashMap<*const Item, u32>,
 }
 
 /// 表达式求值后得到的运行时值（仅在执行引擎内部使用）。
@@ -97,6 +101,11 @@ enum Value {
 /// 从源码构建执行上下文：解析 DSL，并收集角色与变量定义。
 fn build_exec_context(src: &str) -> Result<ExecContext, EngineError> {
     let script = parse_script(src)?;
+
+    // 为命令语句分配静态 source_index。
+    let mut source_index_map: HashMap<*const Item, u32> = HashMap::new();
+    let mut next_index: u32 = 0;
+    assign_source_indices(&script.items, &mut next_index, &mut source_index_map);
 
     let mut roles: HashMap<String, RoleRuntimeConfig> = HashMap::new();
     let mut vars: HashMap<String, String> = HashMap::new();
@@ -129,7 +138,35 @@ fn build_exec_context(src: &str) -> Result<ExecContext, EngineError> {
         script,
         roles,
         vars,
+        source_index_map,
     })
+}
+
+/// 为脚本中的语句分配静态 source_index，仅对 speak/sleep 语句赋值。
+fn assign_source_indices(
+    items: &[Item],
+    next_index: &mut u32,
+    map: &mut HashMap<*const Item, u32>,
+) {
+    for item in items {
+        match item {
+            Item::Speak(_) | Item::Sleep(_) => {
+                let ptr: *const Item = item;
+                map.insert(ptr, *next_index);
+                *next_index += 1;
+            }
+            Item::If(stmt) => {
+                assign_source_indices(&stmt.body, next_index, map);
+            }
+            Item::For(stmt) => {
+                assign_source_indices(&stmt.body, next_index, map);
+            }
+            Item::While(stmt) => {
+                assign_source_indices(&stmt.body, next_index, map);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// 运行一段 DSL 脚本：
@@ -244,7 +281,7 @@ where
 
 /// 执行层命令枚举。
 /// 这是从 DSL “预编译”后的结果，消费方拿到命令即可直接执行（如播放或进一步处理）。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum EngineCommand {
     /// 已经完成合成的一段音频数据，可以直接播放。
     SpeakAudio {
@@ -267,6 +304,14 @@ pub enum EngineCommand {
     BgmVolume { volume: f32 },
 }
 
+/// 带有来源索引的命令封装。
+/// - `source_index`：静态脚本中的语句序号（从 0 开始），同一条语句在循环中多次执行会重复使用同一个索引。
+#[derive(Debug, Clone)]
+pub struct EngineCommandWithMeta {
+    pub source_index: u32,
+    pub command: EngineCommand,
+}
+
 /// 将脚本“编译”为一串顺序的执行命令（包含已合成的音频）。
 /// - 对每个 `speak`：立即调用模型完成 TTS，将结果封装为 `SpeakAudio` 命令。
 /// - 对每个 `sleep`：生成 `Sleep` 命令。
@@ -276,12 +321,14 @@ pub async fn compile_script_to_commands<F, Fut>(
     mut on_command: F,
 ) -> Result<(), EngineError>
 where
-    F: FnMut(EngineCommand) -> Fut,
+    F: FnMut(EngineCommandWithMeta) -> Fut,
     Fut: Future<Output = ()>,
 {
     let mut ctx = build_exec_context(src)?;
-    let items = ctx.script.items.clone();
-    exec_items_to_commands(manager, &mut ctx, &items, &mut on_command).await
+    // 通过裸指针获取对脚本 items 的只读切片，以避免同时对 ctx.script 与 ctx 产生冲突借用。
+    let items_ptr: *const [Item] = &ctx.script.items[..];
+    let items: &[Item] = unsafe { &*items_ptr };
+    exec_items_to_commands(manager, &mut ctx, items, &mut on_command).await
 }
 
 /// 遍历并执行一组语句（命令队列版本）。
@@ -292,11 +339,12 @@ fn exec_items_to_commands<'a, F, Fut>(
     on_command: &'a mut F,
 ) -> Pin<Box<dyn Future<Output = Result<(), EngineError>> + 'a>>
 where
-    F: FnMut(EngineCommand) -> Fut,
+    F: FnMut(EngineCommandWithMeta) -> Fut,
     Fut: Future<Output = ()>,
 {
     Box::pin(async move {
         for item in items {
+            let ptr: *const Item = item;
             match item {
                 Item::Model(_) => {}
                 Item::Role(role_def) => {
@@ -319,38 +367,72 @@ where
                 Item::Speak(speak) => {
                     let (model_name, audio) = execute_speak(manager, ctx, speak).await?;
                     if let AudioStream::Full(data) = audio {
-                        on_command(EngineCommand::SpeakAudio { model_name, data }).await;
+                        let idx = *ctx
+                            .source_index_map
+                            .get(&ptr)
+                            .unwrap_or(&u32::MAX);
+                        on_command(EngineCommandWithMeta {
+                            source_index: idx,
+                            command: EngineCommand::SpeakAudio { model_name, data },
+                        })
+                        .await;
                     }
                 }
                 Item::Sleep(stmt) => {
-                    on_command(EngineCommand::Sleep {
-                        duration_ms: stmt.duration_ms,
+                    let idx = *ctx
+                        .source_index_map
+                        .get(&ptr)
+                        .unwrap_or(&u32::MAX);
+                    on_command(EngineCommandWithMeta {
+                        source_index: idx,
+                        command: EngineCommand::Sleep {
+                            duration_ms: stmt.duration_ms,
+                        },
                     })
                     .await;
                 }
                 Item::BgmPlay(stmt) => {
                     // 支持在 BGM 路径中使用 `${var}` 变量插值，例如：bgm "${bgm_path}" loop
                     let path = interpolate_text(&stmt.path_or_url, &ctx.vars);
-                    on_command(EngineCommand::BgmPlay {
-                        path_or_url: path,
-                        r#loop: stmt.r#loop,
+                    on_command(EngineCommandWithMeta {
+                        // BGM 命令当前不会在 GUI 中高亮，进度索引使用占位值。
+                        source_index: u32::MAX,
+                        command: EngineCommand::BgmPlay {
+                            path_or_url: path,
+                            r#loop: stmt.r#loop,
+                        },
                     })
                     .await;
                 }
                 Item::BgmVolume(stmt) => {
-                    on_command(EngineCommand::BgmVolume {
-                        volume: stmt.volume,
+                    on_command(EngineCommandWithMeta {
+                        source_index: u32::MAX,
+                        command: EngineCommand::BgmVolume {
+                            volume: stmt.volume,
+                        },
                     })
                     .await;
                 }
                 Item::BgmPause => {
-                    on_command(EngineCommand::BgmPause).await;
+                    on_command(EngineCommandWithMeta {
+                        source_index: u32::MAX,
+                        command: EngineCommand::BgmPause,
+                    })
+                    .await;
                 }
                 Item::BgmResume => {
-                    on_command(EngineCommand::BgmResume).await;
+                    on_command(EngineCommandWithMeta {
+                        source_index: u32::MAX,
+                        command: EngineCommand::BgmResume,
+                    })
+                    .await;
                 }
                 Item::BgmStop => {
-                    on_command(EngineCommand::BgmStop).await;
+                    on_command(EngineCommandWithMeta {
+                        source_index: u32::MAX,
+                        command: EngineCommand::BgmStop,
+                    })
+                    .await;
                 }
                 Item::If(if_stmt) => {
                     let cond = eval_expr(&if_stmt.condition, &ctx.vars);
@@ -384,7 +466,7 @@ where
 pub async fn compile_script_to_channel(
     manager: &ModelManager,
     src: &str,
-    sender: mpsc::Sender<EngineCommand>,
+    sender: mpsc::Sender<EngineCommandWithMeta>,
 ) -> Result<(), EngineError> {
     compile_script_to_commands(manager, src, move |cmd| {
         let sender = sender.clone();

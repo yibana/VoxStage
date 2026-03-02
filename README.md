@@ -232,7 +232,7 @@ cargo run -p vox-cli -- --log-level trace examples/hello.vox
 
 4. **运行 GUI（可选）**
 
-- 剧本编辑器为 Tauri 桌面应用，当前已完成 Phase 1 + Phase 2（布局 + 桥接验证 + 全局模型/角色配置）：
+- 剧本编辑器为 Tauri 桌面应用，当前已完成 Phase 1–5（布局 + 桥接验证 + 全局模型/角色配置 + 列表式剧本编排 + engine/runner 对接运行 + 进度高亮）：
 
 ```bash
 cd apps/voxstage-gui
@@ -259,8 +259,8 @@ pnpm run tauri dev
 ## 后续规划（MVP → 完整架构）
 
 - [x] **GUI 剧本编辑器 Phase 2**：全局配置（模型/角色），可视化维护模型与角色并持久化到本地。
-- [ ] **GUI 剧本编辑器 Phase 3**：列表式剧本编排（缩进子列表），基于配置中的角色生成剧本步骤。
-- [ ] **GUI 剧本编辑器 Phase 4**：与 engine/runner 对接运行，从列表结构构造 DSL AST / 命令流并播放。
+- [x] **GUI 剧本编辑器 Phase 3**：列表式剧本编排（缩进子列表），支持 `speak/sleep/if/for/while/let/set` 与 BGM 步骤。
+- [x] **GUI 剧本编辑器 Phase 4/5**：与 engine/runner 对接运行，从列表结构构造 `.vox` 文本并播放，支持暂停/继续/中断与执行进度高亮。
 - [ ] 在 `vox-engine` 中引入更完整的变量作用域（块级作用域）及 `else` 分支支持。
 - [ ] 为 `AudioStream` 增加流式模式，并在 `vox-audio` 中实现流式播放。
 - [ ] 提供统一的模型预加载与健康检查机制（`preload()`）。

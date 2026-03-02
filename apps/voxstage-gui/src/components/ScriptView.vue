@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from "vue";
+import { ref, onMounted, onBeforeUnmount, watch, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { ScriptItemType, ScriptItem } from "../types/script";
 import type { RoleEntry, AppConfig } from "../types/config";
 import { createItem, toVox } from "../types/script";
@@ -13,6 +14,11 @@ const mode = ref<"edit" | "code">("edit");
 const codeText = ref("");
 const parseError = ref<string | null>(null);
 
+/** 当前运行到的静态语句索引（与 EngineCommand source_index 对齐），用于高亮当前步骤 */
+const activeSourceIndex = ref<number | null>(null);
+/** 当前高亮的列表行下标（0-based），用于在 UI 中展示更直观的进度 */
+const activeRowIndex = ref<number | null>(null);
+
 /** 可作为子步骤添加的类型及其标签 */
 const childTypeOptions: { value: ScriptItemType; label: string }[] = [
   { value: "speak", label: "说话" },
@@ -22,6 +28,34 @@ const childTypeOptions: { value: ScriptItemType; label: string }[] = [
   { value: "if", label: "如果" },
   { value: "for", label: "循环" },
   { value: "while", label: "当" },
+  { value: "bgm_play", label: "BGM 播放" },
+  { value: "bgm_volume", label: "BGM 音量" },
+  { value: "bgm_pause", label: "BGM 暂停" },
+  { value: "bgm_resume", label: "BGM 恢复" },
+  { value: "bgm_stop", label: "BGM 停止" },
+];
+
+/** 表达式编辑辅助：可用变量列表（来自当前脚本中的 let/set） */
+const availableVars = computed(() => {
+  const set = new Set<string>();
+  for (const it of items.value) {
+    if ((it.type === "let" || it.type === "set") && it.varName) {
+      set.add(it.varName);
+    }
+  }
+  return Array.from(set);
+});
+
+/** 表达式编辑辅助：内置函数模板 */
+const builtinFunctions = [
+  { name: "time_hour()", snippet: "time_hour()", desc: "当前小时 (0-23)" },
+  { name: "rand_int(1, 10)", snippet: "rand_int(1, 10)", desc: "随机整数" },
+  { name: "rand_bool()", snippet: "rand_bool()", desc: "随机布尔值" },
+  {
+    name: 'rand_choice("a", "b")',
+    snippet: 'rand_choice("a", "b")',
+    desc: "从多个选项中随机选择",
+  },
 ];
 
 async function loadRoles() {
@@ -130,7 +164,6 @@ function nextSiblingStart(rangeEnd: number): number {
 function moveUp(index: number) {
   const arr = items.value;
   if (index <= 0) return;
-  const cur = arr[index];
   const prevStart = prevSiblingStart(index);
   if (prevStart < 0) return;
   const rangeEnd = moveRangeEnd(index);
@@ -144,7 +177,6 @@ function moveUp(index: number) {
 /** 下移：找下一个同层级兄弟（可能是块），整段与当前段交换；当前若是块则含子级 */
 function moveDown(index: number) {
   const arr = items.value;
-  const cur = arr[index];
   const rangeEnd = moveRangeEnd(index);
   const nextStart = nextSiblingStart(rangeEnd);
   if (nextStart < 0) return;
@@ -223,8 +255,108 @@ function handleAddRoot(raw: string) {
   addRoot(raw as ScriptItemType);
 }
 
+/** 在当前行后面插入一个与当前行（或块）匹配层级的新步骤 */
+function handleInsertAfter(index: number, raw: string) {
+  if (!raw) return;
+  const arr = items.value;
+  const cur = arr[index];
+  if (!cur) return;
+
+  let indent = cur.indent;
+  // 若是块语句，则默认在块体内插入第一条子步骤
+  if (blockTypes.includes(cur.type)) {
+    indent = cur.indent + 1;
+  }
+
+  const item = createItem(raw as ScriptItemType, indent);
+  arr.splice(index + 1, 0, item);
+}
+
 function clearScript() {
   items.value = [];
+}
+
+/** 运行剧本（编辑模式用 config+items 生成 .vox，Code 模式直接用 codeText） */
+const runError = ref<string | null>(null);
+const isRunning = ref(false);
+const isPaused = ref(false);
+async function runScript() {
+  runError.value = null;
+  isRunning.value = true;
+  isPaused.value = false;
+  activeSourceIndex.value = null;
+  try {
+    if (mode.value === "code") {
+      const voxText = codeText.value;
+      await invoke("run_script", { voxText });
+    } else {
+      const cfg = await invoke<AppConfig>("get_config");
+      const voxText = toVox(cfg, items.value);
+      // 用解析结果规范化 items，并为 speak/sleep 等语句附加 sourceIndex，便于运行时高亮
+      const parsed = await invoke<ScriptItem[]>("parse_vox_to_script", {
+        voxText,
+      });
+      items.value = parsed;
+      await invoke("run_script", { voxText });
+    }
+  } catch (e) {
+    runError.value = String(e);
+  } finally {
+    isRunning.value = false;
+    isPaused.value = false;
+  }
+}
+
+async function pauseScript() {
+  try {
+    await invoke("pause_script");
+    isPaused.value = true;
+  } catch (e) {
+    runError.value = String(e);
+  }
+}
+
+async function resumeScript() {
+  try {
+    await invoke("resume_script");
+    isPaused.value = false;
+  } catch (e) {
+    runError.value = String(e);
+  }
+}
+
+async function stopScript() {
+  try {
+    await invoke("stop_script");
+  } catch (e) {
+    runError.value = String(e);
+  } finally {
+    isRunning.value = false;
+    isPaused.value = false;
+  }
+}
+
+/** 在指定 ScriptItem 的指定字段末尾追加文本（简单插入，不处理光标位置） */
+function appendToField(
+  item: ScriptItem,
+  field: "expr" | "condition" | "times",
+  text: string,
+) {
+  const anyItem = item as any;
+  const cur = (anyItem[field] as string | undefined) ?? "";
+  anyItem[field] = cur ? `${cur}${text}` : text;
+}
+
+function insertVarToExpr(item: ScriptItem, field: "expr" | "condition" | "times", name: string) {
+  appendToField(item, field, name);
+}
+
+function insertBuiltinToExpr(
+  item: ScriptItem,
+  field: "expr" | "condition" | "times",
+  snippet: string,
+) {
+  appendToField(item, field, snippet);
 }
 
 function labelOfType(t: ScriptItemType): string {
@@ -243,6 +375,16 @@ function labelOfType(t: ScriptItemType): string {
       return "定义";
     case "set":
       return "赋值";
+    case "bgm_play":
+      return "BGM 播放";
+    case "bgm_volume":
+      return "BGM 音量";
+    case "bgm_pause":
+      return "BGM 暂停";
+    case "bgm_resume":
+      return "BGM 恢复";
+    case "bgm_stop":
+      return "BGM 停止";
   }
 }
 
@@ -272,9 +414,42 @@ async function loadScriptDraft() {
   }
 }
 
-onMounted(() => {
+let unlistenProgress: (() => void) | null = null;
+let unlistenFinished: (() => void) | null = null;
+
+onMounted(async () => {
   loadRoles();
   loadScriptDraft();
+
+  try {
+    unlistenProgress = await listen<number>("script-progress", (event) => {
+      console.log("script-progress event", event.payload);
+      if (typeof event.payload === "number") {
+        activeSourceIndex.value = event.payload;
+        const rowIdx = items.value.findIndex(
+          (it) => it.sourceIndex === event.payload,
+        );
+        activeRowIndex.value = rowIdx >= 0 ? rowIdx : null;
+      } else {
+        activeSourceIndex.value = null;
+        activeRowIndex.value = null;
+      }
+    });
+    unlistenFinished = await listen("script-finished", () => {
+      console.log("script-finished event");
+      activeSourceIndex.value = null;
+      activeRowIndex.value = null;
+      isRunning.value = false;
+      isPaused.value = false;
+    });
+  } catch (e) {
+    console.error("listen script-progress/script-finished failed", e);
+  }
+});
+
+onBeforeUnmount(() => {
+  if (unlistenProgress) unlistenProgress();
+  if (unlistenFinished) unlistenFinished();
 });
 
 watch(items, () => scheduleSaveDraft(), { deep: true });
@@ -300,17 +475,55 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
       >
         Code
       </button>
+      <span v-if="activeRowIndex !== null" class="run-progress">
+        当前执行行：第 {{ activeRowIndex + 1 }} 行
+      </span>
       <span class="toolbar-spacer"></span>
       <template v-if="mode === 'edit'">
+        <button
+          type="button"
+          class="btn-run"
+          :disabled="isRunning"
+          @click="runScript"
+        >
+          {{ isRunning ? "运行中…" : "运行" }}
+        </button>
+        <button
+          v-if="isRunning"
+          type="button"
+          class="btn-run-secondary"
+          @click="isPaused ? resumeScript() : pauseScript()"
+        >
+          {{ isPaused ? "继续" : "暂停" }}
+        </button>
+        <button
+          v-if="isRunning"
+          type="button"
+          class="btn-run-secondary btn-run-stop"
+          @click="stopScript"
+        >
+          中断
+        </button>
         <span class="toolbar-spacer"></span>
         <button type="button" class="btn-file" @click="openScriptFile">打开</button>
         <button type="button" class="btn-file" @click="saveScriptAs">另存为</button>
         <button type="button" class="btn-clear" @click="clearScript">清空脚本</button>
       </template>
+      <template v-else>
+        <button
+          type="button"
+          class="btn-run"
+          :disabled="isRunning"
+          @click="runScript"
+        >
+          {{ isRunning ? "运行中…" : "运行" }}
+        </button>
+      </template>
     </div>
 
-    <!-- 文件操作错误提示（打开/另存为） -->
+    <!-- 文件操作与运行错误提示 -->
     <p v-if="fileError" class="file-error">{{ fileError }}</p>
+    <p v-if="runError" class="file-error">运行失败：{{ runError }}</p>
 
     <!-- Code 模式：全屏编辑框，返回编辑在右下角 -->
     <div v-if="mode === 'code'" class="code-mode-full">
@@ -335,6 +548,10 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
       <template v-else v-for="(item, idx) in items" :key="item.id">
         <div
           class="script-row"
+          :class="{
+            'script-row-active':
+              item.sourceIndex != null && item.sourceIndex === activeSourceIndex,
+          }"
           :style="{ marginLeft: `${item.indent * 24}px` }"
         >
           <div class="script-row-main">
@@ -350,6 +567,24 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
               class="input text-input"
               placeholder="要说的内容…"
             />
+            <div class="expr-helper">
+              <span class="expr-helper-label">插入文本变量：</span>
+              <select
+                class="expr-helper-select"
+                @change="(e) => {
+                  const el = e.target as HTMLSelectElement;
+                  if (el.value) {
+                    item.text = (item.text || '') + '${' + el.value + '}';
+                    el.value = '';
+                  }
+                }"
+              >
+                <option value="">选择变量</option>
+                <option v-for="v in availableVars" :key="`speak-var-${v}`" :value="v">
+                  {{ v }}
+                </option>
+              </select>
+            </div>
           </template>
 
           <template v-else-if="item.type === 'sleep'">
@@ -368,6 +603,40 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
               class="input text-input"
               placeholder="条件表达式，如 score &gt;= 60"
             />
+            <div class="expr-helper">
+              <span class="expr-helper-label">插入：</span>
+              <select
+                class="expr-helper-select"
+                @change="(e) => {
+                  const el = e.target as HTMLSelectElement;
+                  if (el.value) {
+                    insertVarToExpr(item, 'condition', el.value);
+                    el.value = '';
+                  }
+                }"
+              >
+                <option value="">变量</option>
+                <option v-for="v in availableVars" :key="`if-var-${v}`" :value="v">
+                  {{ v }}
+                </option>
+              </select>
+              <select
+                class="expr-helper-select"
+                @change="(e) => {
+                  const el = e.target as HTMLSelectElement;
+                  if (el.value) {
+                    const fn = builtinFunctions.find((b) => b.name === el.value);
+                    if (fn) insertBuiltinToExpr(item, 'condition', fn.snippet);
+                    el.value = '';
+                  }
+                }"
+              >
+                <option value="">内置函数</option>
+                <option v-for="fn in builtinFunctions" :key="`if-fn-${fn.name}`" :value="fn.name">
+                  {{ fn.name }}
+                </option>
+              </select>
+            </div>
           </template>
 
           <template v-else-if="item.type === 'for'">
@@ -377,6 +646,40 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
               placeholder="次数表达式，如 3 或 n + 1"
             />
             <span class="label">次</span>
+            <div class="expr-helper">
+              <span class="expr-helper-label">插入：</span>
+              <select
+                class="expr-helper-select"
+                @change="(e) => {
+                  const el = e.target as HTMLSelectElement;
+                  if (el.value) {
+                    insertVarToExpr(item, 'times', el.value);
+                    el.value = '';
+                  }
+                }"
+              >
+                <option value="">变量</option>
+                <option v-for="v in availableVars" :key="`for-var-${v}`" :value="v">
+                  {{ v }}
+                </option>
+              </select>
+              <select
+                class="expr-helper-select"
+                @change="(e) => {
+                  const el = e.target as HTMLSelectElement;
+                  if (el.value) {
+                    const fn = builtinFunctions.find((b) => b.name === el.value);
+                    if (fn) insertBuiltinToExpr(item, 'times', fn.snippet);
+                    el.value = '';
+                  }
+                }"
+              >
+                <option value="">内置函数</option>
+                <option v-for="fn in builtinFunctions" :key="`for-fn-${fn.name}`" :value="fn.name">
+                  {{ fn.name }}
+                </option>
+              </select>
+            </div>
           </template>
 
           <template v-else-if="item.type === 'while'">
@@ -386,6 +689,44 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
               placeholder="条件表达式，如 running"
             />
             <span class="label">时</span>
+            <div class="expr-helper">
+              <span class="expr-helper-label">插入：</span>
+              <select
+                class="expr-helper-select"
+                @change="(e) => {
+                  const el = e.target as HTMLSelectElement;
+                  if (el.value) {
+                    insertVarToExpr(item, 'condition', el.value);
+                    el.value = '';
+                  }
+                }"
+              >
+                <option value="">变量</option>
+                <option v-for="v in availableVars" :key="`while-var-${v}`" :value="v">
+                  {{ v }}
+                </option>
+              </select>
+              <select
+                class="expr-helper-select"
+                @change="(e) => {
+                  const el = e.target as HTMLSelectElement;
+                  if (el.value) {
+                    const fn = builtinFunctions.find((b) => b.name === el.value);
+                    if (fn) insertBuiltinToExpr(item, 'condition', fn.snippet);
+                    el.value = '';
+                  }
+                }"
+              >
+                <option value="">内置函数</option>
+                <option
+                  v-for="fn in builtinFunctions"
+                  :key="`while-fn-${fn.name}`"
+                  :value="fn.name"
+                >
+                  {{ fn.name }}
+                </option>
+              </select>
+            </div>
           </template>
 
           <template v-else-if="item.type === 'let'">
@@ -400,6 +741,40 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
               class="input text-input"
               placeholder="表达式，如 1 或 score + 1"
             />
+            <div class="expr-helper">
+              <span class="expr-helper-label">插入：</span>
+              <select
+                class="expr-helper-select"
+                @change="(e) => {
+                  const el = e.target as HTMLSelectElement;
+                  if (el.value) {
+                    insertVarToExpr(item, 'expr', el.value);
+                    el.value = '';
+                  }
+                }"
+              >
+                <option value="">变量</option>
+                <option v-for="v in availableVars" :key="`let-var-${v}`" :value="v">
+                  {{ v }}
+                </option>
+              </select>
+              <select
+                class="expr-helper-select"
+                @change="(e) => {
+                  const el = e.target as HTMLSelectElement;
+                  if (el.value) {
+                    const fn = builtinFunctions.find((b) => b.name === el.value);
+                    if (fn) insertBuiltinToExpr(item, 'expr', fn.snippet);
+                    el.value = '';
+                  }
+                }"
+              >
+                <option value="">内置函数</option>
+                <option v-for="fn in builtinFunctions" :key="`let-fn-${fn.name}`" :value="fn.name">
+                  {{ fn.name }}
+                </option>
+              </select>
+            </div>
           </template>
 
           <template v-else-if="item.type === 'set'">
@@ -414,6 +789,81 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
               class="input text-input"
               placeholder="表达式，如 x + 1"
             />
+            <div class="expr-helper">
+              <span class="expr-helper-label">插入：</span>
+              <select
+                class="expr-helper-select"
+                @change="(e) => {
+                  const el = e.target as HTMLSelectElement;
+                  if (el.value) {
+                    insertVarToExpr(item, 'expr', el.value);
+                    el.value = '';
+                  }
+                }"
+              >
+                <option value="">变量</option>
+                <option v-for="v in availableVars" :key="`set-var-${v}`" :value="v">
+                  {{ v }}
+                </option>
+              </select>
+              <select
+                class="expr-helper-select"
+                @change="(e) => {
+                  const el = e.target as HTMLSelectElement;
+                  if (el.value) {
+                    const fn = builtinFunctions.find((b) => b.name === el.value);
+                    if (fn) insertBuiltinToExpr(item, 'expr', fn.snippet);
+                    el.value = '';
+                  }
+                }"
+              >
+                <option value="">内置函数</option>
+                <option v-for="fn in builtinFunctions" :key="`set-fn-${fn.name}`" :value="fn.name">
+                  {{ fn.name }}
+                </option>
+              </select>
+            </div>
+          </template>
+
+          <template v-else-if="item.type === 'bgm_play'">
+            <span class="icon-bgm icon-bgm-play">▶</span>
+            <input
+              v-model="item.bgmPath"
+              class="input text-input"
+              placeholder="BGM 文件路径或 URL"
+            />
+            <label class="label checkbox-label">
+              <input v-model="item.bgmLoop" type="checkbox" />
+              循环
+            </label>
+          </template>
+
+          <template v-else-if="item.type === 'bgm_volume'">
+            <span class="icon-bgm icon-bgm-volume">🔊</span>
+            <input
+              v-model.number="item.bgmVolume"
+              type="number"
+              min="0"
+              max="1"
+              step="0.05"
+              class="input number-input"
+            />
+            <span class="label">音量 (0-1)</span>
+          </template>
+
+          <template v-else-if="item.type === 'bgm_pause'">
+            <span class="icon-bgm icon-bgm-pause">⏸</span>
+            <span class="label">暂停当前 BGM</span>
+          </template>
+
+          <template v-else-if="item.type === 'bgm_resume'">
+            <span class="icon-bgm icon-bgm-resume">⏯</span>
+            <span class="label">恢复当前 BGM</span>
+          </template>
+
+          <template v-else-if="item.type === 'bgm_stop'">
+            <span class="icon-bgm icon-bgm-stop">⏹</span>
+            <span class="label">停止当前 BGM</span>
           </template>
         </div>
 
@@ -421,6 +871,19 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
           <button type="button" class="btn-row" @click="moveUp(idx)">↑</button>
           <button type="button" class="btn-row" @click="moveDown(idx)">↓</button>
           <button type="button" class="btn-row btn-del" @click="remove(idx)">删</button>
+          <select
+            class="child-add-inline"
+            @change="(e) => { const el = e.target as HTMLSelectElement; handleInsertAfter(idx, el.value); el.value = ''; }"
+          >
+            <option value="">+ 在此行后插入步骤</option>
+            <option
+              v-for="opt in childTypeOptions"
+              :key="opt.value"
+              :value="opt.value"
+            >
+              {{ opt.label }}
+            </option>
+          </select>
         </div>
         </div>
 
@@ -577,6 +1040,60 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
   background: #ffe0e0;
 }
 
+.btn-run {
+  padding: 0.25rem 0.8rem;
+  font-size: 0.8rem;
+  background: #059669;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.btn-run:hover:not(:disabled) {
+  background: #047857;
+}
+
+.btn-run:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.btn-run-secondary {
+  padding: 0.25rem 0.6rem;
+  font-size: 0.8rem;
+  margin-left: 0.5rem;
+  background: #fbbf24;
+  color: #1f2933;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.btn-run-secondary:hover {
+  background: #f59e0b;
+}
+
+.btn-run-stop {
+  background: #ef4444;
+  color: #fff;
+}
+
+.btn-run-stop:hover {
+  background: #dc2626;
+}
+
+.script-row-active {
+  background: rgba(59, 130, 246, 0.16);
+  box-shadow: inset 3px 0 0 #3b82f6;
+}
+
+.run-progress {
+  margin-left: 1rem;
+  font-size: 0.8rem;
+  color: #2563eb;
+}
+
 .code-mode-full {
   flex: 1;
   min-height: 0;
@@ -686,6 +1203,14 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
   background: #dc2626;
 }
 
+.badge-bgm_play,
+.badge-bgm_volume,
+.badge-bgm_pause,
+.badge-bgm_resume,
+.badge-bgm_stop {
+  background: #0f766e;
+}
+
 .label {
   font-size: 0.8rem;
   color: #555;
@@ -713,6 +1238,40 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
 
 .number-input {
   width: 5rem;
+}
+
+.expr-helper {
+  margin-top: 0.2rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  align-items: center;
+}
+
+.expr-helper-label {
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+
+.expr-helper-select {
+  padding: 0.1rem 0.35rem;
+  font-size: 0.7rem;
+  border-radius: 999px;
+  border: 1px solid #d4d4d8;
+  background: #f9fafb;
+}
+
+.icon-bgm {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  margin-right: 0.35rem;
+  font-size: 0.75rem;
+  border-radius: 999px;
+  background: #e0f2fe;
+  color: #0369a1;
 }
 
 .child-add {

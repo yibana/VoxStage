@@ -70,8 +70,8 @@ async fn main() {
     }
     info!("已注册的模型数量: {}", manager.len());
 
-    // 4. 调用 runner，将脚本交给引擎执行并在本地播放音频。
-    if let Err(err) = run_script_with_audio(&manager, &script_source).await {
+    // 4. 调用 runner，将脚本交给引擎执行并在本地播放音频（CLI 模式不支持暂停/停止/进度回调）。
+    if let Err(err) = run_script_with_audio(&manager, &script_source, None, None, None).await {
         tracing::error!("执行脚本失败: {err:?}");
     }
 }
