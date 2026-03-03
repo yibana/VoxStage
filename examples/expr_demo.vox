@@ -28,6 +28,8 @@ let base_score = 70
 let bonus      = 10
 let score      = base_score + bonus * 2
 let val = score + 2 * 10 -1
+let i = 1
+speak Wolf "结果是：${i+1}"
 
 ########################
 # 2. if + 比较/逻辑    #

@@ -21,7 +21,7 @@ use tokio::time::{sleep, Duration};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 use vox_core::{AudioStream, SynthesisRequest, TtsError, TtsProvider};
-use vox_dsl::{parse_script, Expr, Item, ModelDef, Script, SetStmt, SpeakStmt, SleepStmt};
+use vox_dsl::{parse_expr, parse_script, Expr, Item, ModelDef, Script, SetStmt, SpeakStmt, SleepStmt};
 
 pub use model_manager::ModelManager;
 
@@ -69,6 +69,9 @@ pub enum EngineError {
     /// 根据脚本 model 块注册 Provider 时失败。
     #[error("model registration: {0}")]
     ModelRegistration(String),
+    /// 文本插值错误（`${...}` 表达式解析或匹配失败等）。
+    #[error("interpolation error: {0}")]
+    Interpolation(String),
 }
 
 /// 角色运行时配置。
@@ -392,8 +395,8 @@ where
                     .await;
                 }
                 Item::BgmPlay(stmt) => {
-                    // 支持在 BGM 路径中使用 `${var}` 变量插值，例如：bgm "${bgm_path}" loop
-                    let path = interpolate_text(&stmt.path_or_url, &ctx.vars);
+                    // 支持在 BGM 路径中使用 `${...}` 表达式插值，例如：bgm \"${bgm_path}\" loop
+                    let path = interpolate_text(&stmt.path_or_url, &ctx.vars)?;
                     on_command(EngineCommandWithMeta {
                         // BGM 命令当前不会在 GUI 中高亮，进度索引使用占位值。
                         source_index: u32::MAX,
@@ -522,7 +525,7 @@ async fn execute_speak(
         }
     }
 
-    let interpolated_text = interpolate_text(&speak.text, &ctx.vars);
+    let interpolated_text = interpolate_text(&speak.text, &ctx.vars)?;
 
     let req = SynthesisRequest {
         text: interpolated_text,
@@ -762,39 +765,118 @@ fn eval_builtin(name: &str, args: &[Value]) -> Value {
     }
 }
 
-/// 在 speak 文本中执行 `${var}` 风格的简单字符串插值。
-fn interpolate_text(text: &str, vars: &HashMap<String, String>) -> String {
+/// 在文本中执行 `${...}` 表达式插值。
+///
+/// - `${name}`：视为变量引用，与旧逻辑兼容；
+/// - `${i + 1}` / `${format_time(ts)}`：按照 DSL 表达式语法解析并求值。
+fn interpolate_text(text: &str, vars: &HashMap<String, String>) -> Result<String, EngineError> {
     let mut result = String::new();
-    let mut chars = text.chars().peekable();
+    let mut chars = text.char_indices().peekable();
+    let mut last_pos: usize = 0;
 
-    while let Some(ch) = chars.next() {
+    while let Some((i, ch)) = chars.next() {
         if ch == '$' {
-            if let Some('{') = chars.peek().copied() {
-                chars.next(); // 跳过 '{'
-                let mut name = String::new();
-                while let Some(&c) = chars.peek() {
+            if let Some(&(_brace_idx, '{')) = chars.peek() {
+                // 先把 `${` 之前的字面量片段写入结果。
+                if i > last_pos {
+                    result.push_str(&text[last_pos..i]);
+                }
+
+                // 消费 '{'，记录表达式起始位置。
+                let (brace_idx, brace_ch) = chars.next().unwrap();
+                debug_assert_eq!(brace_ch, '{');
+                let expr_start = brace_idx + brace_ch.len_utf8();
+
+                // 向前扫描，找到匹配的 '}'，同时跳过字符串字面量中的字符。
+                let mut in_string = false;
+                let mut string_delim = '\0';
+                let mut end_idx: Option<usize> = None;
+
+                while let Some((j, c)) = chars.next() {
+                    if in_string {
+                        if c == string_delim {
+                            in_string = false;
+                        }
+                        continue;
+                    }
+                    if c == '"' || c == '\'' {
+                        in_string = true;
+                        string_delim = c;
+                        continue;
+                    }
                     if c == '}' {
-                        chars.next(); // 跳过 '}'
+                        end_idx = Some(j);
                         break;
-                    } else {
-                        name.push(c);
-                        chars.next();
                     }
                 }
-                if let Some(value) = vars.get(&name) {
-                    result.push_str(value);
-                } else {
-                    // 如果变量未定义，则保留原样。
-                    result.push_str("${");
-                    result.push_str(&name);
-                    result.push('}');
+
+                let end_idx = match end_idx {
+                    Some(idx) => idx,
+                    None => {
+                        return Err(EngineError::Interpolation(format!(
+                            "未闭合的插值占位符，从位置 {} 开始: {}",
+                            i, text
+                        )));
+                    }
+                };
+
+                let inner = &text[expr_start..end_idx];
+                let inner_trimmed = inner.trim();
+                if inner_trimmed.is_empty() {
+                    return Err(EngineError::Interpolation(
+                        "空的插值表达式 `${}`".to_string(),
+                    ));
                 }
+
+                let expr = parse_expr(inner_trimmed).map_err(|e| {
+                    EngineError::Interpolation(format!(
+                        "插值表达式解析失败 `{}`: {}",
+                        inner_trimmed, e
+                    ))
+                })?;
+                let value = eval_expr(&expr, vars);
+                result.push_str(&value_to_string(&value));
+
+                // 更新下一个字面量片段的起始位置（跳过 '}'）。
+                last_pos = end_idx + '}'.len_utf8();
                 continue;
             }
         }
-        result.push(ch);
     }
 
-    result
+    // 追加最后一个字面量片段（包括无任何插值的情况）。
+    if last_pos < text.len() {
+        result.push_str(&text[last_pos..]);
+    }
+
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interpolate_expr_i_plus_1() {
+        let mut vars = HashMap::new();
+        vars.insert("i".to_string(), "1".to_string());
+        let r = interpolate_text("结果是：${i+1}", &vars).unwrap();
+        assert_eq!(r, "结果是：2");
+    }
+
+    #[test]
+    fn interpolate_var_only() {
+        let mut vars = HashMap::new();
+        vars.insert("name".to_string(), "世界".to_string());
+        let r = interpolate_text("你好，${name}！", &vars).unwrap();
+        assert_eq!(r, "你好，世界！");
+    }
+
+    #[test]
+    fn interpolate_empty_expr_fails() {
+        let vars = HashMap::new();
+        let r = interpolate_text("${}", &vars);
+        assert!(r.is_err());
+    }
 }
 

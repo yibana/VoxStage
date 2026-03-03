@@ -53,9 +53,11 @@ pnpm run tauri dev
 # 仅前端构建（生成 dist，用于 Tauri build）
 pnpm build
 
-# 打包桌面应用
+# 打包桌面应用（会先执行 pnpm build 再打包，发行版必须用此方式，否则 exe 打开会「无法访问此页面」）
 pnpm tauri build
 ```
+
+**发行版说明**：若只运行 `cargo build --release -p voxstage-gui` 且未先执行 `pnpm build`，生成 exe 内无前端资源，运行时会显示「无法访问此页面」。发布请使用 `pnpm run tauri build`，产物在 `src-tauri/target/release/bundle/`。
 
 推荐 IDE 与插件：
 

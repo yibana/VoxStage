@@ -148,7 +148,10 @@ apps/voxstage-gui  (Tauri 应用，前端 Vue 3，后续将对接 engine/runner)
     - `speak` 语句：触发一次 TTS 调用，支持在括号中写覆盖参数：
       - `speak Girl "一句话"`
       - `speak Girl(speed = 1.3, language = "EN") "另一句话"`
-      - 支持在文本中使用 `${var}` 字符串插值，例如：`speak Girl "你好，${user_name}"`。
+      - 支持在文本中使用 `${...}` 字符串插值，其中 `...` 为完整表达式（与 `let/set/if/for/while` 相同语法），例如：
+        - 仅变量：`speak Girl "你好，${user_name}"`；
+        - 算术表达式：`speak Wolf "结果是：${i + 1}"`；
+        - 调用内置函数：`speak Wolf "现在是：${time_hour()} 点"`。
     - `sleep` 语句：在执行过程插入延迟（毫秒），如 `sleep 1000`。
     - `if` 条件语句：条件为通用表达式，例如：
       - `if score >= 90 && lang == "ZH" { ... }`
@@ -218,7 +221,7 @@ cargo run -p vox-cli -- examples/gpt_sovits_full.vox
 # 混合使用 gpt_sovits_v2 与 bert_vits2 的示例
 cargo run -p vox-cli -- examples/mix_gpt_bert.vox
 
-# 表达式能力示例：let/if/for/while 使用 + - * /、比较、逻辑与括号
+# 表达式能力示例：let/if/for/while 使用 + - * /、比较、逻辑与括号，并在 speak 文本中插入 `${表达式}`
 cargo run -p vox-cli -- examples/expr_demo.vox
 
 # 随机与内置函数示例：time_hour/rand_int/rand_bool/rand_choice
@@ -252,6 +255,26 @@ pnpm run tauri dev
 ```
 
 - 需已安装 Node.js 与 pnpm。窗口打开后默认进入「配置」Tab，可通过界面维护模型与角色，配置将保存到本机 `app_data_dir/config.json`。后续 Phase 将加入列表式剧本编排与运行。
+
+5. **构建 GUI 发行版（Release）**
+
+- 发行版 exe 必须**内嵌前端资源**，否则打开会显示「无法访问此页面」。请勿仅使用 `cargo build --release -p voxstage-gui` 且未先构建前端。
+- **推荐**：在 GUI 目录下用 Tauri 完整构建（会先执行 `pnpm build` 再打包）：
+
+```bash
+cd apps/voxstage-gui
+pnpm install
+pnpm run tauri build
+```
+
+- 安装包与可执行文件在 `apps/voxstage-gui/src-tauri/target/release/bundle/` 下（如 `msi/` 或 `nsis/` 中的安装程序）。若需单独 exe，可从该 bundle 目录中复制**整个应用文件夹**（exe + 同目录下的资源），不要只复制 exe。
+- **若从仓库根目录构建**：须先生成前端再构建 Rust，否则 exe 内无前端页面：
+
+```bash
+cd apps/voxstage-gui && pnpm install && pnpm run build
+cd ../..
+cargo build --release -p voxstage-gui
+```
 
   示例脚本说明：
 

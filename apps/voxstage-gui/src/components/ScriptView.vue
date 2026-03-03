@@ -718,7 +718,8 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
 
           <template v-else-if="item.type === 'if'">
             <ExprInput
-              v-model="item.condition"
+              :model-value="item.condition ?? ''"
+              @update:model-value="(v) => (item.condition = v)"
               :variables="availableVars"
               :builtins="builtinFunctions"
               placeholder="条件表达式，如 score >= 60"
@@ -727,7 +728,8 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
 
           <template v-else-if="item.type === 'for'">
             <ExprInput
-              v-model="item.times"
+              :model-value="item.times ?? ''"
+              @update:model-value="(v) => (item.times = v)"
               :variables="availableVars"
               :builtins="builtinFunctions"
               placeholder="次数表达式，如 3 或 n + 1"
@@ -737,7 +739,8 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
 
           <template v-else-if="item.type === 'while'">
             <ExprInput
-              v-model="item.condition"
+              :model-value="item.condition ?? ''"
+              @update:model-value="(v) => (item.condition = v)"
               :variables="availableVars"
               :builtins="builtinFunctions"
               placeholder="条件表达式，如 running"
@@ -753,7 +756,8 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
             />
             <span class="label">=</span>
             <ExprInput
-              v-model="item.expr"
+              :model-value="item.expr ?? ''"
+              @update:model-value="(v) => (item.expr = v)"
               :variables="availableVars"
               :builtins="builtinFunctions"
               placeholder="表达式，如 1 或 score + 1"
@@ -768,7 +772,8 @@ watch(items, () => scheduleSaveDraft(), { deep: true });
             />
             <span class="label">=</span>
             <ExprInput
-              v-model="item.expr"
+              :model-value="item.expr ?? ''"
+              @update:model-value="(v) => (item.expr = v)"
               :variables="availableVars"
               :builtins="builtinFunctions"
               placeholder="表达式，如 x + 1"

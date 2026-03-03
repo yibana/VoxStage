@@ -7,5 +7,5 @@ mod parser;
 
 pub use ast::*;
 pub use error::ParseError;
-pub use parser::parse_script;
+pub use parser::{parse_expr, parse_script};
 

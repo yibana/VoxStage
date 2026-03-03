@@ -985,6 +985,15 @@ fn parse_expr_from_str(line_idx: usize, src: &str) -> Result<Expr, ParseError> {
     Ok(expr)
 }
 
+/// 从单行源码字符串解析表达式（用于插值等场景）。
+///
+/// - `src`: 表达式源码片段，例如 `"i + 1"` 或 `format_time(ts)`。
+/// - 返回：`Expr` 抽象语法树或 `ParseError`。
+pub fn parse_expr(src: &str) -> Result<Expr, ParseError> {
+    // 这里使用虚拟行号 0，错误中的行号统一为 1。
+    parse_expr_from_str(0, src)
+}
+
 fn parse_expr_bp(
     line_idx: usize,
     tokens: &[Token],
